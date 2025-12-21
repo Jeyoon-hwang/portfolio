@@ -49,3 +49,5 @@
 
 ![수료증사진1](path/to/image1.png)
 ![수료증사진2](path/to/image2.png)
+![수료증사진3](path/to/image3.png)
+![수료증사진4](path/to/image4.png)
