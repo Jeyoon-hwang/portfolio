@@ -47,7 +47,7 @@
 ### 📜 수료 내역
 아래 사진들은 내가 수료한 것들이다.
 
-![수료증사진1](path/to/image1.png)
-![수료증사진2](path/to/image2.png)
-![수료증사진3](path/to/image3.png)
-![수료증사진4](path/to/image4.png)
+![수료증사진1](/image1.png)
+![수료증사진2](/image2.png)
+![수료증사진3](/image3.png)
+
