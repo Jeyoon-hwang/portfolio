@@ -1,6 +1,5 @@
-// 2026년 7월 기준 실제 DeepSeek 모델 ID를 확인할 수 없어 'deepseek-chat'으로 지정했다.
-// 계정에서 사용 가능한 정확한 모델명(스펙상 "DeepSeek V4 Flash")으로 교체해서 쓸 것.
-const DEEPSEEK_MODEL = 'deepseek-chat';
+import { callGemini, extractGeminiText, GEMINI_FLASH_LITE_MODEL } from './gemini.js';
+
 const BATCH_SIZE = 100;
 const VALID_CATEGORIES = ['rebuttal', 'source', 'agree', 'misc'];
 
@@ -19,32 +18,6 @@ function buildUserPrompt(batch) {
   return batch
     .map((c, i) => `${i}: ${(c.textOriginal || '').replace(/\n+/g, ' ').slice(0, 500)}`)
     .join('\n');
-}
-
-async function callDeepSeek(systemPrompt, userPrompt, apiKey) {
-  const res = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: DEEPSEEK_MODEL,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`DeepSeek API error ${res.status}: ${text}`);
-  }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
 }
 
 function parseClassificationArray(raw) {
@@ -67,8 +40,8 @@ export async function classifyComments(comments, apiKey) {
     let parsed = null;
     for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
       try {
-        const raw = await callDeepSeek(SYSTEM_PROMPT, userPrompt, apiKey);
-        const arr = parseClassificationArray(raw);
+        const data = await callGemini(GEMINI_FLASH_LITE_MODEL, SYSTEM_PROMPT, userPrompt, apiKey);
+        const arr = parseClassificationArray(extractGeminiText(data));
         if (arr && arr.length) parsed = arr;
       } catch {
         // 재시도 1회 후에도 실패하면 이 배치는 misc 기본값을 유지한다

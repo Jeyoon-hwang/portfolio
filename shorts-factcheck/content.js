@@ -276,9 +276,9 @@
     const keysStatus = await sendMessage({ type: 'GET_KEYS_STATUS' });
     if (token !== runToken) return;
 
-    const missing = ['youtube', 'deepseek', 'gemini'].filter((k) => !keysStatus[k]);
+    const missing = ['youtube', 'gemini'].filter((k) => !keysStatus[k]);
     if (missing.length) {
-      const labelMap = { youtube: 'YouTube', deepseek: 'DeepSeek', gemini: 'Gemini' };
+      const labelMap = { youtube: 'YouTube', gemini: 'Gemini' };
       setSectionBody('comments', missingKeyHtml(missing.map((k) => labelMap[k])));
       setSectionBody('factcheck', '<p class="sfc-note">API 키를 먼저 설정하세요.</p>');
       return;

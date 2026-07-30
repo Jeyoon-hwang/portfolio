@@ -80,7 +80,7 @@
 </head>
 <body>
   <h1>🔍 유튜브 쇼츠 팩트체크 - API 키 설정</h1>
-  <p class="sub">아래 4개의 API 키는 이 브라우저의 <code>chrome.storage.local</code>에만 저장되며, 외부 서버로 전송되지 않습니다.</p>
+  <p class="sub">아래 3개의 API 키는 이 브라우저의 <code>chrome.storage.local</code>에만 저장되며, 외부 서버로 전송되지 않습니다.</p>
 
   <div class="warn">
     ⚠️ 이 확장 프로그램은 개인 사용을 전제로 합니다. 키가 로컬에 평문으로 저장되므로, 이 브라우저 프로필을 다른 사람과 공유하지 마세요.
@@ -93,14 +93,8 @@
   </div>
 
   <div class="field">
-    <label for="deepseekApiKey">DeepSeek API 키</label>
-    <div class="desc">댓글 분류, 반박 댓글 주장 추출에 사용됩니다.</div>
-    <input type="password" id="deepseekApiKey" autocomplete="off" placeholder="sk-..." />
-  </div>
-
-  <div class="field">
     <label for="geminiApiKey">Gemini (Google AI) API 키</label>
-    <div class="desc">Google 검색 그라운딩을 활용한 팩트체크 최종 판정에 사용됩니다. 프로젝트 코어 기능입니다.</div>
+    <div class="desc">댓글 분류, 반박 댓글 주장 추출(Flash-Lite)과 Google 검색 그라운딩을 활용한 팩트체크 최종 판정(Pro)에 모두 사용됩니다. 프로젝트 코어 기능입니다.</div>
     <input type="password" id="geminiApiKey" autocomplete="off" placeholder="AIza..." />
   </div>
 

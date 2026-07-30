@@ -1,10 +1,7 @@
-// 댓글 반박 주장 추출(DeepSeek) + 웹서치 기반 팩트체크 판정(Gemini) 담당 모듈.
+// 댓글 반박 주장 추출 + 웹서치 기반 팩트체크 판정 담당 모듈. 둘 다 Gemini를 쓰되,
+// 주장 추출은 저렴한 Flash-Lite, 최종 판정은 정확도가 중요해 Pro + 검색 그라운딩을 쓴다.
+import { callGemini, extractGeminiText, isGeminiBlocked, GEMINI_FLASH_LITE_MODEL, GEMINI_PRO_MODEL } from './gemini.js';
 
-// 2026년 7월 기준 실제 DeepSeek 모델 ID를 확인할 수 없어 'deepseek-chat'으로 지정했다.
-const DEEPSEEK_MODEL = 'deepseek-chat';
-// 팩트체크는 프로젝트 코어라 정확도를 우선한다.
-// 2026년 7월 기준 실제 Gemini 모델 ID를 확인할 수 없어 임시 지정. 계정에서 쓸 수 있는 최신 모델명으로 교체할 것.
-const GEMINI_MODEL = 'gemini-2.5-pro';
 const VALID_VERDICTS = ['사실', '거짓', '불충분', '부분적 사실'];
 
 const EXTRACT_SYSTEM_PROMPT = `너는 유튜브 댓글에서 검증 가능한 사실 주장을 1개 추출하는 도구다.
@@ -23,32 +20,6 @@ const VERIFY_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 주어진 주
 마크다운 코드블록이나 백틱은 쓰지 마라.
 {"verdict":"사실|거짓|불충분|부분적 사실","reason":"판정 근거를 한두 문장으로 요약","sources":["https://...", "https://..."]}`;
 
-async function callDeepSeek(systemPrompt, userPrompt, apiKey) {
-  const res = await fetch('https://api.deepseek.com/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Authorization: `Bearer ${apiKey}`,
-    },
-    body: JSON.stringify({
-      model: DEEPSEEK_MODEL,
-      temperature: 0,
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`DeepSeek API error ${res.status}: ${text}`);
-  }
-
-  const data = await res.json();
-  return data.choices?.[0]?.message?.content || '';
-}
-
 function parseJsonObject(raw) {
   const cleaned = raw.replace(/```json|```/g, '');
   const match = cleaned.match(/\{[\s\S]*\}/);
@@ -66,8 +37,8 @@ export async function extractClaim(commentText, apiKey) {
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
-      const raw = await callDeepSeek(EXTRACT_SYSTEM_PROMPT, userPrompt, apiKey);
-      parsed = parseJsonObject(raw);
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, EXTRACT_SYSTEM_PROMPT, userPrompt, apiKey);
+      if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도
     }
@@ -79,42 +50,17 @@ export async function extractClaim(commentText, apiKey) {
   return null;
 }
 
-// googleSearch 그라운딩 툴 사용. 필드명은 Gemini API 버전에 따라 바뀔 수 있으니
-// 응답에 groundingMetadata가 비어 있으면 이 부분(툴 키 이름)부터 확인할 것.
-async function callGemini(userText, apiKey) {
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-goog-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: VERIFY_SYSTEM_PROMPT }] },
-      contents: [{ role: 'user', parts: [{ text: userText }] }],
-      tools: [{ googleSearch: {} }],
-      generationConfig: { temperature: 0 },
-    }),
-  });
-
-  if (!res.ok) {
-    const text = await res.text().catch(() => '');
-    throw new Error(`Gemini API error ${res.status}: ${text}`);
-  }
-
-  return res.json();
-}
-
 export async function verifyClaim(claim, apiKey) {
-  const data = await callGemini(`주장: ${claim}`, apiKey);
+  const data = await callGemini(GEMINI_PRO_MODEL, VERIFY_SYSTEM_PROMPT, `주장: ${claim}`, apiKey, [
+    { googleSearch: {} },
+  ]);
 
-  // 안전 정책상 차단되면 candidates가 비고 promptFeedback.blockReason이 채워진다.
-  const candidate = data.candidates?.[0];
-  if (data.promptFeedback?.blockReason || !candidate || candidate.finishReason === 'SAFETY') {
+  if (isGeminiBlocked(data)) {
     return { verdict: '불충분', reason: '정책상 이 주장은 판정할 수 없습니다.', sources: [] };
   }
 
-  const finalText = (candidate.content?.parts || []).map((p) => p.text || '').join('');
+  const candidate = data.candidates[0];
+  const finalText = extractGeminiText(data);
   const groundingSources = (candidate.groundingMetadata?.groundingChunks || [])
     .map((c) => c.web)
     .filter(Boolean)

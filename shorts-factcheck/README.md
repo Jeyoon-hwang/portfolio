@@ -12,7 +12,7 @@
 
 1. `chrome://extensions` 접속 → 우측 상단 "개발자 모드" 켜기
 2. "압축해제된 확장 프로그램을 로드합니다" → 이 폴더(`shorts-factcheck/`) 선택
-3. 확장 프로그램 아이콘 클릭(또는 확장 프로그램 관리 페이지에서 "세부정보 → 확장 프로그램 옵션") → API 키 4종 입력
+3. 확장 프로그램 아이콘 클릭(또는 확장 프로그램 관리 페이지에서 "세부정보 → 확장 프로그램 옵션") → API 키 3종 입력
 4. 유튜브 쇼츠 페이지(`https://www.youtube.com/shorts/...`)로 이동
 
 ## 필요한 API 키
@@ -20,8 +20,7 @@
 | 키 | 용도 | 발급처 |
 |---|---|---|
 | YouTube Data API v3 | 댓글 수집 | Google Cloud Console |
-| DeepSeek | 댓글 분류, 주장 추출 | platform.deepseek.com |
-| Gemini (Google AI) | Google 검색 그라운딩 기반 팩트체크 판정 | aistudio.google.com |
+| Gemini (Google AI) | 댓글 분류·주장 추출(Flash-Lite) + Google 검색 그라운딩 기반 팩트체크 판정(Pro) | aistudio.google.com |
 | Google Cloud Vision | 원본 영상 역방향 이미지 검색 | Google Cloud Console (Vision API 활성화) |
 
 키는 옵션 페이지에서 입력하면 `chrome.storage.local`에만 저장됩니다.
@@ -33,10 +32,10 @@ content.js (패널 주입, videoId 감지, 프레임 캡처)
     │  chrome.runtime.sendMessage
     ▼
 background.js (service worker, 모든 외부 API 호출)
-    ├─ YouTube Data API v3   (댓글 수집)
-    ├─ DeepSeek API          (댓글 분류, 주장 추출)
-    ├─ Gemini API + Google 검색 그라운딩 (팩트체크 판정)
-    └─ Google Cloud Vision   (원본 영상 역검색)
+    ├─ YouTube Data API v3           (댓글 수집)
+    ├─ Gemini API (Flash-Lite)       (댓글 분류, 주장 추출)
+    ├─ Gemini API (Pro) + 검색 그라운딩 (팩트체크 판정)
+    └─ Google Cloud Vision           (원본 영상 역검색)
     ▼
 chrome.storage.local (API 키 + videoId별 결과 캐싱, TTL 7일)
 ```
@@ -55,13 +54,13 @@ content script는 유튜브 페이지와 컨텍스트를 공유하고 CSP 제약
 
 - API 키는 소스코드에 하드코딩되어 있지 않습니다. 반드시 옵션 페이지에서 입력하세요.
 - 확장 프로그램 특성상 키는 이 브라우저에 로컬 평문으로 저장됩니다. **개인 사용을 전제로 합니다.** 이 브라우저 프로필을 공유하거나, 이 저장소를 포크해 공개 배포하려면 키를 대신 보관·중계하는 프록시 서버가 별도로 필요합니다.
-- `manifest.json`의 `host_permissions`는 실제로 호출하는 4개 API 도메인으로만 한정되어 있습니다 (`<all_urls>` 미사용).
+- `manifest.json`의 `host_permissions`는 실제로 호출하는 3개 API 도메인으로만 한정되어 있습니다 (`<all_urls>` 미사용).
 - 모든 외부 API 호출(키가 든 요청 포함)은 확장 프로그램의 격리된 컨텍스트인 service worker(background.js)에서만 보냅니다.
 
 ## 예상 비용
 
-영상 1건 분석 기준 100원 미만 (댓글 분류: DeepSeek 수 원, 팩트체크 3~5건: Gemini 수 원, 원본 검색: 이미지 3장 거의 0원). 정확한 단가는 각 API 제공사의 최신 요금표를 확인하세요.
+영상 1건 분석 기준 100원 미만 (댓글 분류·주장 추출: Gemini Flash-Lite 수 원 미만, 팩트체크 3~5건: Gemini Pro 수 원, 원본 검색: 이미지 3장 거의 0원). 정확한 단가는 Google AI 최신 요금표를 확인하세요.
 
-## 참고: 팩트체크 모델/툴 이름은 확인이 필요합니다
+## 참고: Gemini 모델/툴 이름은 확인이 필요합니다
 
-`lib/factcheck.js`의 `GEMINI_MODEL`과 `googleSearch` 그라운딩 툴 키 이름은 2026년 7월 시점 정확한 값을 확인할 수 없어 최선으로 추정해 넣었습니다. 실제 키로 첫 호출을 해보고, 응답에 `groundingMetadata`가 비어 있거나 400 에러가 나면 이 두 값부터 최신 Gemini API 문서 기준으로 교체하세요.
+`lib/gemini.js`의 `GEMINI_FLASH_LITE_MODEL`(`gemini-2.5-flash-lite`), `GEMINI_PRO_MODEL`(`gemini-2.5-pro`)과 `googleSearch` 그라운딩 툴 키 이름은 2026년 7월 시점 정확한 값을 확인할 수 없어 최선으로 추정해 넣었습니다. 실제 키로 첫 호출을 해보고, 400 에러가 나거나 팩트체크 응답에 `groundingMetadata`가 비어 있으면 이 값들부터 최신 Gemini API 문서 기준으로 교체하세요.
