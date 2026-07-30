@@ -9,21 +9,52 @@
   let currentVideoId = null;
   let currentSourceComments = [];
   let runToken = 0; // 빠른 스크롤 중 이전 분석 결과가 늦게 도착해 덮어쓰는 것을 방지
+  let pollTimerId = null;
+  let contextInvalidated = false;
 
   function getVideoIdFromLocation() {
     const m = location.pathname.match(/^\/shorts\/([^/?#]+)/);
     return m ? m[1] : null;
   }
 
+  // 확장 프로그램이 재로드/업데이트되면 이미 페이지에 주입된 이전 content script 인스턴스는
+  // chrome.runtime 접근이 끊긴다(페이지 새로고침 전까지). 이 경우를 감지해 조용히 멈춘다.
+  function isExtensionContextValid() {
+    return typeof chrome !== 'undefined' && !!chrome.runtime && !!chrome.runtime.id;
+  }
+
+  function handleContextInvalidated() {
+    if (contextInvalidated) return;
+    contextInvalidated = true;
+    if (pollTimerId) {
+      clearInterval(pollTimerId);
+      pollTimerId = null;
+    }
+    if (panelEl) {
+      panelEl.innerHTML =
+        '<div class="sfc-section"><div class="sfc-section-body"><p class="sfc-note">확장 프로그램이 업데이트되었습니다. 이 탭을 새로고침(F5)하면 다시 정상 작동합니다.</p></div></div>';
+    }
+  }
+
   function sendMessage(msg) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage(msg, (response) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
-        }
-        resolve(response);
-      });
+      if (!isExtensionContextValid()) {
+        handleContextInvalidated();
+        reject(new Error('EXTENSION_CONTEXT_INVALIDATED'));
+        return;
+      }
+      try {
+        chrome.runtime.sendMessage(msg, (response) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          resolve(response);
+        });
+      } catch (err) {
+        handleContextInvalidated();
+        reject(err);
+      }
     });
   }
 
@@ -266,6 +297,7 @@
       });
       if (videoId === currentVideoId) renderOriginalResult(result);
     } catch (err) {
+      if (contextInvalidated) return;
       if (videoId === currentVideoId) showOriginalMessage('검색 중 오류가 발생했습니다: ' + err.message);
     }
   }
@@ -358,11 +390,17 @@
     ensurePanel();
     renderSkeleton();
     runAnalysis(videoId, token).catch((err) => {
+      if (contextInvalidated) return;
       if (token === runToken) setSectionBody('comments', `<p class="sfc-note">오류: ${escapeHtml(err.message)}</p>`);
     });
   }
 
   function checkRoute() {
+    if (contextInvalidated) return;
+    if (!isExtensionContextValid()) {
+      handleContextInvalidated();
+      return;
+    }
     const videoId = getVideoIdFromLocation();
     if (videoId === currentVideoId) return;
     onVideoChange(videoId);
@@ -377,7 +415,7 @@
   }
 
   // 위 이벤트들을 놓치는 경우를 위한 최후의 폴백 (SPA 라우팅 감지 실패는 전체 기능을 무너뜨리므로 이중 삼중으로 방어한다)
-  setInterval(checkRoute, 1000);
+  pollTimerId = setInterval(checkRoute, 1000);
 
   checkRoute();
 })();
