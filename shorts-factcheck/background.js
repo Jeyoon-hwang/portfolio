@@ -146,18 +146,18 @@ function isVideoPlatformUrl(url) {
 }
 
 async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey) {
-  let candidateUrls = [];
+  let candidates = [];
 
   if (visionApiKey && frames && frames.length) {
     try {
-      const urls = await reverseSearch(frames, visionApiKey);
-      candidateUrls = urls.filter(isVideoPlatformUrl);
+      const results = await reverseSearch(frames, visionApiKey);
+      candidates = results.filter((r) => isVideoPlatformUrl(r.url));
     } catch {
       // Vision 검색 실패 시 아래 댓글 URL 폴백으로 진행
     }
   }
 
-  let items = await buildResultItems(candidateUrls, youtubeApiKey);
+  let items = await buildResultItems(candidates, youtubeApiKey);
 
   // Vision 검색이 0건이면 'source'로 분류된 댓글에서 URL을 추출해 후보로 제시
   if (!items.length && sourceComments && sourceComments.length) {
@@ -165,11 +165,17 @@ async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey)
     for (const text of sourceComments) {
       fallbackUrls.push(...extractUrlsFromText(text));
     }
-    items = await buildResultItems([...new Set(fallbackUrls)], youtubeApiKey);
+    items = await buildResultItems(
+      [...new Set(fallbackUrls)].map((url) => ({ url, matchCount: 0 })),
+      youtubeApiKey,
+    );
     items.forEach((item) => (item.fromComment = true));
   }
 
+  // 여러 프레임에서 공통으로 검색된 후보(matchCount 높음)일수록 우연한 매칭이 아닐
+  // 가능성이 높으므로 먼저 정렬하고, 그 안에서는 업로드일이 이른 순으로 정렬한다.
   items.sort((a, b) => {
+    if ((b.matchCount || 0) !== (a.matchCount || 0)) return (b.matchCount || 0) - (a.matchCount || 0);
     if (a.uploadDate && b.uploadDate) return new Date(a.uploadDate) - new Date(b.uploadDate);
     if (a.uploadDate) return -1;
     if (b.uploadDate) return 1;
@@ -181,9 +187,9 @@ async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey)
   return { items: items.slice(0, 5), found: items.length > 0 };
 }
 
-async function buildResultItems(urls, youtubeApiKey) {
+async function buildResultItems(candidates, youtubeApiKey) {
   const items = [];
-  for (const url of urls) {
+  for (const { url, matchCount } of candidates) {
     const videoId = extractYoutubeVideoId(url);
     let uploadDate = null;
     if (videoId && youtubeApiKey) {
@@ -191,7 +197,7 @@ async function buildResultItems(urls, youtubeApiKey) {
     }
     // 유튜브 영상이면 API 호출 없이 공개 썸네일 URL을 바로 쓸 수 있다.
     const thumbnail = videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : null;
-    items.push({ url, domain: safeHostname(url), videoId, uploadDate, thumbnail });
+    items.push({ url, domain: safeHostname(url), videoId, uploadDate, thumbnail, matchCount: matchCount || 0 });
   }
   return items;
 }

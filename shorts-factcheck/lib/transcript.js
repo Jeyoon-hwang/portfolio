@@ -140,9 +140,19 @@ async function fetchOneTrackUrl(url) {
   } catch {
     // baseUrl이 상대경로 등 URL 파싱이 안 되면 원본 그대로 시도
   }
-  const res = await fetch(url, { credentials: 'include' });
-  if (!res.ok) return null;
-  return parseTranscriptText(await res.text());
+  // Referer가 youtube.com 페이지가 아니면 유튜브 쪽에서 빈 200 응답을 주는 경우가 있어
+  // (에러가 아니라 조용히 빈 본문) referrer를 명시적으로 지정한다.
+  const res = await fetch(url, { credentials: 'include', referrer: 'https://www.youtube.com/', referrerPolicy: 'strict-origin-when-cross-origin' });
+  if (!res.ok) {
+    console.warn('[SFC transcript] track fetch not ok', url, res.status);
+    return null;
+  }
+  const raw = await res.text();
+  const text = parseTranscriptText(raw);
+  if (!text) {
+    console.warn('[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ')', url);
+  }
+  return text;
 }
 
 async function fetchTrackText(videoId, track) {

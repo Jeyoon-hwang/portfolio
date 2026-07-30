@@ -367,6 +367,15 @@
   font-weight: 600;
 }
 
+#sfc-panel .sfc-original-match {
+  background: #fff3e0;
+  color: #e65100;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
 /* 유튜브 다크모드 대응 */
 html[dark] #sfc-panel {
   background: #212121;
@@ -426,6 +435,11 @@ html[dark] #sfc-panel .sfc-find-original-btn:hover {
 html[dark] #sfc-panel .sfc-original-badge {
   background: #1b3a1e;
   color: #81c784;
+}
+
+html[dark] #sfc-panel .sfc-original-match {
+  background: #3a2a10;
+  color: #ffb74d;
 }
 
 html[dark] #sfc-panel .sfc-panel-header {

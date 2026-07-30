@@ -343,6 +343,7 @@
               <div class="sfc-original-meta">
                 ${item.uploadDate ? `<span class="sfc-original-date">${escapeHtml(new Date(item.uploadDate).toLocaleDateString('ko-KR'))}</span>` : ''}
                 ${item.isOriginalGuess ? '<span class="sfc-original-badge">원본 추정</span>' : ''}
+                ${item.matchCount > 1 ? `<span class="sfc-original-match" title="캡처한 프레임 중 ${item.matchCount}개에서 이 페이지가 검색됨">🎯${item.matchCount}프레임 일치</span>` : ''}
               </div>
             </div>
           </div>
@@ -380,13 +381,29 @@
     });
   }
 
-  // 현재 시점 + 앞뒤로 살짝 떨어진 지점, 총 최대 3장. 1장만 캡처하면 흐린 프레임에 검색이 통째로 실패할 수 있다.
+  // 영상 전체에 고르게 펼쳐 최대 5장을 캡처한다. 한 시점 근처만 찍으면 그 장면이 자막/전환/
+  // 블러로 흐릴 때 검색이 통째로 실패할 수 있고, 여러 프레임을 찍어둬야 배경지에서
+  // 우연히 매칭된 무관한 후보와 실제로 여러 장면에서 반복 매칭되는 진짜 후보를
+  // 투표(matchCount)로 구분할 수 있다.
+  const FRAME_COUNT = 5;
+
   async function captureFrames(video) {
-    const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
     const originalTime = video.currentTime;
     const wasPaused = video.paused;
 
-    const targets = [...new Set([0, -1, 1].map((off) => originalTime + off).filter((t) => t >= 0 && t <= duration))];
+    let targets;
+    if (duration > 2) {
+      // 맨 처음/끝은 암전이나 인트로·아웃트로가 많아 10%~90% 구간에서만 고르게 뽑는다.
+      const usableStart = duration * 0.1;
+      const usableEnd = duration * 0.9;
+      const span = usableEnd - usableStart;
+      targets = Array.from({ length: FRAME_COUNT }, (_, i) => usableStart + (span * i) / (FRAME_COUNT - 1));
+    } else {
+      // 길이를 알 수 없거나 너무 짧은 영상은 현재 재생 지점 기준 앞뒤로 대체한다.
+      targets = [0, -1, 1].map((off) => originalTime + off).filter((t) => t >= 0);
+    }
+    targets = [...new Set(targets.map((t) => Math.max(0, duration ? Math.min(t, duration) : t)))];
 
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth || 640;
