@@ -3,7 +3,6 @@
 import { fetchComments, fetchUploadDate } from './lib/youtube.js';
 import { classifyComments } from './lib/classifier.js';
 import { extractClaim, extractVideoClaim, verifyClaim } from './lib/factcheck.js';
-import { fetchTranscript } from './lib/transcript.js';
 import { reverseSearch, extractYoutubeVideoId, extractUrlsFromText } from './lib/reverse-search.js';
 import { getCache, setCache } from './lib/cache.js';
 
@@ -52,13 +51,15 @@ async function handle(message) {
       return await fetchComments(message.videoId, youtubeApiKey);
     }
 
-    // 댓글/분류와 독립적인 작업이라, content.js가 GET_COMMENTS와 동시에 이 메시지도 쏴서
-    // 팩트체크 단계에 도달할 때쯤엔 이미 끝나 있게 만든다 (임계 경로에서 제거).
+    // 자막 자체는 content.js가 유튜브 페이지 컨텍스트(같은 origin, 실제 쿠키/세션)에서
+    // 미리 가져와 message.transcript로 넘겨준다 — 여기(서비스 워커)는 별도 chrome-extension://
+    // 출처라 그 fetch를 대신 해줄 수 없다(쿠키가 안 실려 다운로드가 계속 빈 응답으로 왔었다).
+    // 여기서는 API 키가 필요한 Gemini 호출(핵심 주장 추출)만 담당한다.
     case 'GET_VIDEO_CLAIM': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
-      const { text: transcript, reason } = await fetchTranscript(message.videoId).catch(() => ({ text: null, reason: 'error' }));
-      if (!transcript) return { videoClaim: null, transcriptReason: reason };
+      const transcript = message.transcript || null;
+      if (!transcript) return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks' };
       const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
       return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim' };
     }

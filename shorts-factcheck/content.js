@@ -465,6 +465,185 @@
     }
   }
 
+  // ---------- 자막(transcript) 가져오기 ----------
+  // background.js(서비스 워커)에서 fetch하면 chrome-extension:// 출처의 완전히 별도 컨텍스트라
+  // credentials:'include'를 줘도 유튜브가 실제 브라우저 세션으로 인식하지 못해 다운로드가
+  // 계속 빈 응답으로 오는 문제가 있었다. content script는 유튜브 페이지 자체(같은 origin)에서
+  // 실행되므로 이 fetch들은 일반 페이지의 same-origin 요청과 동일하게 쿠키/세션이 자연스럽게
+  // 실린다 — 그래서 이 부분만 content.js로 옮겼다. Gemini 호출(API 키 필요)은 여전히
+  // background.js에서 한다.
+
+  function decodeHtmlEntities(str) {
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+  }
+
+  function parseTranscriptText(xml) {
+    const textRe = /<text\b[^>]*>([\s\S]*?)<\/text>/g;
+    const parts = [];
+    let m;
+    while ((m = textRe.exec(xml))) {
+      parts.push(decodeHtmlEntities(m[1]));
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function pickTranscriptTrack(tracks) {
+    if (!tracks.length) return null;
+    const manual = tracks.filter((t) => !t.kind);
+    const asr = tracks.filter((t) => t.kind === 'asr');
+    return manual.find((t) => t.langCode === 'ko') || manual[0] || asr.find((t) => t.langCode === 'ko') || asr[0] || tracks[0];
+  }
+
+  // JSON.parse가 실패하지 않도록, 마커 뒤 첫 '{'부터 문자열 안의 중괄호는 무시하고
+  // 실제로 짝이 맞는 지점까지 잘라낸다. 정규식으로 "};"까지 자르면 문자열 값 안에
+  // 세미콜론/중괄호가 있을 때 잘못 잘린다.
+  function extractBalancedJson(html, marker) {
+    const markerIdx = html.indexOf(marker);
+    if (markerIdx === -1) return null;
+    const start = html.indexOf('{', markerIdx);
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < html.length; i++) {
+      const ch = html[i];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === '\\') escape = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return html.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  async function fetchTracksFromWatchPage(videoId) {
+    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: { 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8' },
+    });
+    if (!res.ok) {
+      console.warn('[SFC transcript] watch page fetch failed', videoId, res.status);
+      return [];
+    }
+    const html = await res.text();
+
+    const jsonText = extractBalancedJson(html, 'ytInitialPlayerResponse');
+    if (!jsonText) {
+      console.warn('[SFC transcript] ytInitialPlayerResponse marker not found', videoId);
+      return [];
+    }
+
+    let playerResponse;
+    try {
+      playerResponse = JSON.parse(jsonText);
+    } catch (err) {
+      console.warn('[SFC transcript] ytInitialPlayerResponse JSON parse failed', videoId, err);
+      return [];
+    }
+
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!Array.isArray(tracks)) {
+      console.info('[SFC transcript] no captionTracks in playerResponse (video likely has no captions)', videoId);
+      return [];
+    }
+
+    return tracks
+      .filter((t) => t.baseUrl)
+      .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
+  }
+
+  function parseListTracks(xml) {
+    const tracks = [];
+    const tagRe = /<track\b([^>]*)\/>/g;
+    let m;
+    while ((m = tagRe.exec(xml))) {
+      const attrs = m[1];
+      const langMatch = attrs.match(/lang_code="([^"]*)"/);
+      const kindMatch = attrs.match(/kind="([^"]*)"/);
+      if (langMatch) tracks.push({ langCode: langMatch[1], kind: kindMatch ? kindMatch[1] : null });
+    }
+    return tracks;
+  }
+
+  async function fetchTracksFromListEndpoint(videoId) {
+    const res = await fetch(`https://www.youtube.com/api/timedtext?type=list&v=${videoId}`);
+    if (!res.ok) return [];
+    return parseListTracks(await res.text());
+  }
+
+  function buildFallbackTimedtextUrl(videoId, track) {
+    const params = new URLSearchParams({ v: videoId, lang: track.langCode });
+    if (track.kind) params.set('kind', track.kind);
+    return `https://www.youtube.com/api/timedtext?${params.toString()}`;
+  }
+
+  async function fetchOneTrackUrl(url) {
+    try {
+      // baseUrl에 fmt 파라미터가 이미 들어있으면 WebVTT/JSON3 등 우리 정규식이 못 읽는
+      // 형식으로 올 수 있어, 항상 기본 XML(<text> 태그) 형식이 오도록 fmt를 제거한다.
+      const u = new URL(url);
+      u.searchParams.delete('fmt');
+      url = u.toString();
+    } catch {
+      // baseUrl이 상대경로 등 URL 파싱이 안 되면 원본 그대로 시도
+    }
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn('[SFC transcript] track fetch not ok', url, res.status);
+      return null;
+    }
+    const raw = await res.text();
+    const text = parseTranscriptText(raw);
+    if (!text) {
+      console.warn('[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ')', url);
+    }
+    return text;
+  }
+
+  async function fetchTrackText(videoId, track) {
+    if (track.baseUrl) {
+      const text = await fetchOneTrackUrl(track.baseUrl);
+      if (text) return text;
+      console.warn('[SFC transcript] baseUrl fetch empty, trying fallback timedtext URL', videoId);
+    }
+    const fallbackText = await fetchOneTrackUrl(buildFallbackTimedtextUrl(videoId, track));
+    if (!fallbackText) console.warn('[SFC transcript] fallback timedtext URL also empty', videoId, track);
+    return fallbackText;
+  }
+
+  // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
+  // 'no_tracks' | 'empty_track' | 'error' | 'ok'
+  async function fetchTranscript(videoId) {
+    try {
+      let tracks = await fetchTracksFromWatchPage(videoId);
+      if (!tracks.length) {
+        tracks = await fetchTracksFromListEndpoint(videoId);
+      }
+
+      const track = pickTranscriptTrack(tracks);
+      if (!track) return { text: null, reason: 'no_tracks' };
+
+      const text = await fetchTrackText(videoId, track);
+      return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };
+    } catch (err) {
+      console.error('[SFC transcript] unexpected error', videoId, err);
+      return { text: null, reason: 'error' };
+    }
+  }
+
   // ---------- 분석 파이프라인 ----------
 
   async function runAnalysis(videoId, token) {
@@ -491,8 +670,16 @@
 
     // 댓글 수집과 영상 자막 처리는 서로 독립적이라 동시에 쏜다. 팩트체크 단계에
     // 도달할 때쯤(댓글 수집 + 분류가 끝난 뒤)이면 이 가벼운 호출은 이미 끝나 있을 것이다.
+    // 자막은 이 페이지(content script) 자체에서 가져오고, Gemini 추출만 background에 맡긴다.
     const commentsPromise = sendMessage({ type: 'GET_COMMENTS', videoId });
-    const videoClaimPromise = sendMessage({ type: 'GET_VIDEO_CLAIM', videoId }).catch(() => ({ videoClaim: null, transcriptReason: 'error' }));
+    const videoClaimPromise = fetchTranscript(videoId)
+      .catch(() => ({ text: null, reason: 'error' }))
+      .then(({ text, reason }) =>
+        sendMessage({ type: 'GET_VIDEO_CLAIM', videoId, transcript: text, transcriptReason: reason }).catch(() => ({
+          videoClaim: null,
+          transcriptReason: reason,
+        })),
+      );
 
     const commentsRes = await commentsPromise;
     if (token !== runToken) return;

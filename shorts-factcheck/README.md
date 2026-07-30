@@ -28,12 +28,11 @@
 ## 아키텍처
 
 ```
-content.js (패널 주입, videoId 감지, 프레임 캡처)
+content.js (패널 주입, videoId 감지, 프레임 캡처, 자막(timedtext) 직접 fetch)
     │  chrome.runtime.sendMessage
     ▼
-background.js (service worker, 모든 외부 API 호출)
+background.js (service worker, API 키가 필요한 모든 외부 호출)
     ├─ YouTube Data API v3           (댓글 수집)
-    ├─ YouTube timedtext (비공식)     (영상 자막 → 영상 핵심 주장 추출용)
     ├─ Gemini API (Flash-Lite)       (댓글 분류, 댓글/영상 주장 추출)
     ├─ Gemini API (Pro) + 검색 그라운딩 (팩트체크 판정: 영상 주장 vs 반박 댓글)
     └─ Google Cloud Vision           (원본 영상 역검색)
@@ -41,7 +40,10 @@ background.js (service worker, 모든 외부 API 호출)
 chrome.storage.local (API 키 + videoId별 결과 캐싱, TTL 7일)
 ```
 
-content script는 유튜브 페이지와 컨텍스트를 공유하고 CSP 제약을 받으므로, API 키가 든 요청은 격리된 컨텍스트인 service worker(background.js)에서만 보낸다.
+API 키가 든 요청은 격리된 컨텍스트인 service worker(background.js)에서만 보낸다. 예외로 자막(timedtext) fetch는
+API 키가 필요 없는데도 content.js에서 직접 한다 — service worker는 `chrome-extension://` 출처라 완전히
+별도 세션이라 쿠키가 안 실리는 반면, content script는 유튜브 페이지 자체(same-origin)에서 실행되므로
+실제 브라우저 쿠키/세션이 자연스럽게 실려 성공률이 더 높다.
 
 ## 한계 (알고 사용할 것)
 
@@ -49,7 +51,7 @@ content script는 유튜브 페이지와 컨텍스트를 공유하고 CSP 제약
 - **팩트체크는 좋아요 상위 5개 반박 댓글까지만** 검증합니다 (비용/속도 문제).
 - **답글은 스레드당 최대 5개(최신순)까지만** 수집됩니다. `commentThreads.list`가 무료로 함께 주는 만큼만 쓰기 때문 — 스레드마다 `comments.list`를 추가로 부르면 쿼터가 스레드 수만큼 늘어나 감당이 안 됩니다.
 - **댓글은 최대 300개(3페이지)까지만** 수집합니다.
-- **영상 핵심 주장은 자막이 있는 영상에서만** 표시됩니다. 자막 없는 노래/밈 클립은 반박 댓글 주장만 독립적으로 검증합니다. 자막 수집 자체가 유튜브 비공식 엔드포인트(timedtext)라 예고 없이 막힐 수 있습니다.
+- **영상 핵심 주장은 자막이 있는 영상에서만** 표시됩니다. 자막 없는 노래/밈 클립은 반박 댓글 주장만 독립적으로 검증합니다. 자막 수집 자체가 유튜브 비공식 엔드포인트(timedtext)라 예고 없이 막힐 수 있고, 실제로 자동생성(ASR) 자막 트랙은 유튜브의 봇 방지 서명/토큰 검증에 걸려 요청이 200 OK인데도 본문이 빈 채로 오는 사례가 확인됐습니다 — 이 경우도 자막 없는 영상과 동일하게 처리됩니다. 사람이 직접 입력한 수동 자막은 상대적으로 안정적입니다.
 - 롱폼(일반) 영상은 지원하지 않습니다. 쇼츠 전용입니다.
 - 반박 댓글이 많아 팩트체크 대기 시간이 길어지면, MV3 service worker의 유휴 종료 정책으로 인해 드물게 응답이 끊길 수 있습니다. 이 경우 패널을 새로고침(쇼츠를 한 번 넘겼다가 돌아오기)하면 캐시가 없는 부분부터 재시도됩니다.
 - **속도**: 댓글 분류 배치, 영상 자막 처리, 반박 댓글 5개의 추출·판정을 모두 병렬로 돌려서 전체 지연을 "가장 느린 호출 1개" 수준으로 줄였습니다. 다만 웹서치가 붙는 판정 호출 자체의 응답 시간(네트워크 + LLM 생성 + 검색)에는 하한선이 있어서, 매우 짧은(15초 이하) 쇼츠에서는 시청 시간의 절반 안에 못 끝날 수도 있습니다.
