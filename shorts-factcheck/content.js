@@ -604,7 +604,8 @@
     try {
       const res = await sendMessage({ type: 'GET_CAPTION_TRACKS' });
       return Array.isArray(res?.tracks) ? res.tracks : [];
-    } catch {
+    } catch (err) {
+      console.warn('[SFC transcript] GET_CAPTION_TRACKS message failed', err?.message || err);
       return [];
     }
   }
@@ -615,11 +616,20 @@
     try {
       // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기 (가장 신뢰도 높음 — 서명/토큰이 완전하다)
       let tracks = await fetchTracksFromMainWorld();
+      let source = 'mainWorld';
+      console.info('[SFC transcript] mainWorld tracks:', tracks.length);
       // 2) watch 페이지를 다시 fetch해 정적 HTML에서 파싱 (SPA 전환 직후라 아직 갱신 안 된 경우 등의 폴백)
-      if (!tracks.length) tracks = await fetchTracksFromWatchPage(videoId);
+      if (!tracks.length) {
+        tracks = await fetchTracksFromWatchPage(videoId);
+        source = 'watchPageFetch';
+        console.info('[SFC transcript] watchPageFetch tracks:', tracks.length);
+      }
 
       const track = pickTranscriptTrack(tracks);
       if (!track || !track.baseUrl) return { text: null, reason: 'no_tracks' };
+      // ei/expire가 매 요청 발급 시각마다 바뀌므로, 같은 baseUrl이 반복 등장하면(=값이 안 바뀌면)
+      // 캐시되거나 정체된 값을 계속 쓰고 있다는 신호다.
+      console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
 
       const text = await fetchOneTrackUrl(track.baseUrl);
       return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };

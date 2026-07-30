@@ -76,15 +76,25 @@ async function handle(message, sender) {
     }
 
     case 'GET_CAPTION_TRACKS': {
-      if (!sender?.tab?.id) return { tracks: [] };
+      if (!sender?.tab?.id) {
+        console.warn('[SFC transcript] GET_CAPTION_TRACKS: no sender.tab.id, cannot inject into MAIN world');
+        return { tracks: [] };
+      }
+      if (!chrome.scripting) {
+        console.error('[SFC transcript] chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension in chrome://extensions.');
+        return { tracks: [] };
+      }
       try {
         const [injection] = await chrome.scripting.executeScript({
           target: { tabId: sender.tab.id },
           world: 'MAIN',
           func: mainWorldGetCaptionTracks,
         });
-        return { tracks: Array.isArray(injection?.result) ? injection.result : [] };
-      } catch {
+        const tracks = Array.isArray(injection?.result) ? injection.result : [];
+        console.info('[SFC transcript] MAIN-world extraction returned', tracks.length, 'tracks for tab', sender.tab.id);
+        return { tracks };
+      } catch (err) {
+        console.error('[SFC transcript] chrome.scripting.executeScript failed:', err?.message || err);
         return { tracks: [] };
       }
     }
