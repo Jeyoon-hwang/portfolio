@@ -52,6 +52,16 @@ async function handle(message) {
       return await fetchComments(message.videoId, youtubeApiKey);
     }
 
+    // 댓글/분류와 독립적인 작업이라, content.js가 GET_COMMENTS와 동시에 이 메시지도 쏴서
+    // 팩트체크 단계에 도달할 때쯤엔 이미 끝나 있게 만든다 (임계 경로에서 제거).
+    case 'GET_VIDEO_CLAIM': {
+      const { geminiApiKey } = await getKeys();
+      if (!geminiApiKey) return { error: 'missing_key' };
+      const transcript = await fetchTranscript(message.videoId).catch(() => null);
+      const videoClaim = transcript ? await extractVideoClaim(transcript, geminiApiKey).catch(() => null) : null;
+      return { videoClaim };
+    }
+
     case 'CLASSIFY_COMMENTS': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
@@ -61,7 +71,7 @@ async function handle(message) {
     case 'FACTCHECK_COMMENTS': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
-      return await factcheckComments(message.videoId, message.comments, geminiApiKey);
+      return await factcheckComments(message.comments, geminiApiKey, message.videoClaim || null);
     }
 
     case 'FIND_ORIGINAL': {
@@ -82,25 +92,23 @@ async function handle(message) {
 }
 
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).
-// 자막이 있으면 영상 자체의 핵심 주장도 함께 뽑아서, "영상은 이렇게 말했는데 반박 댓글은
-// 이렇게 반박했고 실제로는 어느 쪽이 맞다"를 판정할 때 맥락으로 넘긴다.
-async function factcheckComments(videoId, comments, geminiApiKey) {
-  const transcript = await fetchTranscript(videoId).catch(() => null);
-  const videoClaim = transcript ? await extractVideoClaim(transcript, geminiApiKey).catch(() => null) : null;
-
+// 웹서치가 붙는 verifyClaim(Gemini Pro)이 제일 느린 호출이라, 5개를 순차로 돌리면
+// 그 지연이 그대로 5배 쌓인다 — 병렬로 돌려서 "가장 느린 1개"의 시간만 들게 한다.
+async function factcheckComments(comments, geminiApiKey, videoClaim) {
   const topRebuttals = [...comments]
     .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0))
     .slice(0, MAX_FACTCHECK_TARGETS);
 
-  const results = [];
-  for (const comment of topRebuttals) {
-    const claim = await extractClaim(comment.textOriginal, geminiApiKey);
-    if (!claim) continue; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
-    const verdict = await verifyClaim(claim, geminiApiKey, videoClaim);
-    results.push({ comment: comment.textOriginal, claim, ...verdict });
-  }
+  const results = await Promise.all(
+    topRebuttals.map(async (comment) => {
+      const claim = await extractClaim(comment.textOriginal, geminiApiKey);
+      if (!claim) return null; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
+      const verdict = await verifyClaim(claim, geminiApiKey, videoClaim);
+      return { comment: comment.textOriginal, claim, ...verdict };
+    }),
+  );
 
-  return { factchecks: results, videoClaim };
+  return { factchecks: results.filter(Boolean) };
 }
 
 // Vision Web Detection은 화면 워터마크(녹화 프로그램 로고 등)처럼 영상 내용과 무관한

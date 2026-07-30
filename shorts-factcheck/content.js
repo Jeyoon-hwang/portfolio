@@ -368,7 +368,12 @@
       return;
     }
 
-    const commentsRes = await sendMessage({ type: 'GET_COMMENTS', videoId });
+    // 댓글 수집과 영상 자막 처리는 서로 독립적이라 동시에 쏜다. 팩트체크 단계에
+    // 도달할 때쯤(댓글 수집 + 분류가 끝난 뒤)이면 이 가벼운 호출은 이미 끝나 있을 것이다.
+    const commentsPromise = sendMessage({ type: 'GET_COMMENTS', videoId });
+    const videoClaimPromise = sendMessage({ type: 'GET_VIDEO_CLAIM', videoId }).catch(() => ({ videoClaim: null }));
+
+    const commentsRes = await commentsPromise;
     if (token !== runToken) return;
 
     if (commentsRes.error === 'comments_disabled') {
@@ -411,14 +416,15 @@
     let factchecks = [];
     let videoClaim = null;
     if (rebuttalComments.length) {
-      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', videoId, comments: rebuttalComments });
+      const videoClaimRes = await videoClaimPromise;
+      videoClaim = videoClaimRes.videoClaim || null;
+      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim });
       if (token !== runToken) return;
       if (fcRes.error) {
         setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
         return;
       }
       factchecks = fcRes.factchecks || [];
-      videoClaim = fcRes.videoClaim || null;
     }
     renderFactcheckSection(factchecks, videoClaim);
 
