@@ -2,8 +2,8 @@
 
 유튜브 쇼츠를 볼 때 영상 옆에 패널을 띄워서 세 가지를 알려주는 크롬 확장 프로그램입니다.
 
-1. **댓글 여론 분포** — 댓글이 반박 중심인지 동조 중심인지 도넛 차트로 표시
-2. **반박 댓글 팩트체크** — 좋아요 상위 반박 댓글의 주장을 웹서치 기반으로 검증
+1. **댓글 여론 분포** — 댓글이 반박 중심인지 동조 중심인지 도넛 차트 + 카테고리별 대표 댓글(좋아요 최다순 1개)로 표시. 대댓글(답글)도 최대 5개/스레드까지 함께 수집해 분류합니다 — 논쟁은 답글에서 벌어지는 경우가 많기 때문입니다.
+2. **반박 댓글 팩트체크** — 영상 자막이 있으면 영상의 핵심 주장을 뽑아 보여주고, 좋아요 상위 반박 댓글의 주장을 그 맥락(영상 주장 + 답글이면 원댓글)과 함께 웹서치로 검증
 3. **원본 영상 찾기** — 프레임 캡처 후 역방향 이미지 검색으로 원본 출처 추정 (버튼 클릭 시에만 동작)
 
 백엔드 서버 없이 확장 프로그램만으로 동작하며, 외부 API를 직접 호출합니다.
@@ -12,7 +12,7 @@
 
 1. `chrome://extensions` 접속 → 우측 상단 "개발자 모드" 켜기
 2. "압축해제된 확장 프로그램을 로드합니다" → 이 폴더(`shorts-factcheck/`) 선택
-3. 확장 프로그램 아이콘 클릭(또는 확장 프로그램 관리 페이지에서 "세부정보 → 확장 프로그램 옵션") → API 키 4종 입력
+3. 확장 프로그램 아이콘 클릭(또는 확장 프로그램 관리 페이지에서 "세부정보 → 확장 프로그램 옵션") → API 키 3종 입력
 4. 유튜브 쇼츠 페이지(`https://www.youtube.com/shorts/...`)로 이동
 
 ## 필요한 API 키
@@ -20,8 +20,7 @@
 | 키 | 용도 | 발급처 |
 |---|---|---|
 | YouTube Data API v3 | 댓글 수집 | Google Cloud Console |
-| DeepSeek | 댓글 분류, 주장 추출 | platform.deepseek.com |
-| Gemini (Google AI) | Google 검색 그라운딩 기반 팩트체크 판정 | aistudio.google.com |
+| Gemini (Google AI) | 댓글 분류·주장 추출(Flash-Lite) + Google 검색 그라운딩 기반 팩트체크 판정(Pro) | aistudio.google.com |
 | Google Cloud Vision | 원본 영상 역방향 이미지 검색 | Google Cloud Console (Vision API 활성화) |
 
 키는 옵션 페이지에서 입력하면 `chrome.storage.local`에만 저장됩니다.
@@ -33,10 +32,11 @@ content.js (패널 주입, videoId 감지, 프레임 캡처)
     │  chrome.runtime.sendMessage
     ▼
 background.js (service worker, 모든 외부 API 호출)
-    ├─ YouTube Data API v3   (댓글 수집)
-    ├─ DeepSeek API          (댓글 분류, 주장 추출)
-    ├─ Gemini API + Google 검색 그라운딩 (팩트체크 판정)
-    └─ Google Cloud Vision   (원본 영상 역검색)
+    ├─ YouTube Data API v3           (댓글 수집)
+    ├─ YouTube timedtext (비공식)     (영상 자막 → 영상 핵심 주장 추출용)
+    ├─ Gemini API (Flash-Lite)       (댓글 분류, 댓글/영상 주장 추출)
+    ├─ Gemini API (Pro) + 검색 그라운딩 (팩트체크 판정: 영상 주장 vs 반박 댓글)
+    └─ Google Cloud Vision           (원본 영상 역검색)
     ▼
 chrome.storage.local (API 키 + videoId별 결과 캐싱, TTL 7일)
 ```
@@ -47,21 +47,27 @@ content script는 유튜브 페이지와 컨텍스트를 공유하고 CSP 제약
 
 - **원본 영상 찾기는 "확정"이 아니라 "후보 제시"입니다.** 이미 수천 번 퍼진 밈 영상은 후보가 너무 많아 판별이 어렵고, 반대로 원본이 웹에 거의 노출되지 않은 마이너 영상은 검색 자체가 실패할 수 있습니다. UI에는 항상 "원본 추정"이라는 표현만 사용합니다.
 - **팩트체크는 좋아요 상위 5개 반박 댓글까지만** 검증합니다 (비용/속도 문제).
+- **답글은 스레드당 최대 5개(최신순)까지만** 수집됩니다. `commentThreads.list`가 무료로 함께 주는 만큼만 쓰기 때문 — 스레드마다 `comments.list`를 추가로 부르면 쿼터가 스레드 수만큼 늘어나 감당이 안 됩니다.
 - **댓글은 최대 300개(3페이지)까지만** 수집합니다.
+- **영상 핵심 주장은 자막이 있는 영상에서만** 표시됩니다. 자막 없는 노래/밈 클립은 반박 댓글 주장만 독립적으로 검증합니다. 자막 수집 자체가 유튜브 비공식 엔드포인트(timedtext)라 예고 없이 막힐 수 있습니다.
 - 롱폼(일반) 영상은 지원하지 않습니다. 쇼츠 전용입니다.
 - 반박 댓글이 많아 팩트체크 대기 시간이 길어지면, MV3 service worker의 유휴 종료 정책으로 인해 드물게 응답이 끊길 수 있습니다. 이 경우 패널을 새로고침(쇼츠를 한 번 넘겼다가 돌아오기)하면 캐시가 없는 부분부터 재시도됩니다.
+- **속도**: 댓글 분류 배치, 영상 자막 처리, 반박 댓글 5개의 추출·판정을 모두 병렬로 돌려서 전체 지연을 "가장 느린 호출 1개" 수준으로 줄였습니다. 다만 웹서치가 붙는 판정 호출 자체의 응답 시간(네트워크 + LLM 생성 + 검색)에는 하한선이 있어서, 매우 짧은(15초 이하) 쇼츠에서는 시청 시간의 절반 안에 못 끝날 수도 있습니다.
 
 ## 보안 주의사항
 
 - API 키는 소스코드에 하드코딩되어 있지 않습니다. 반드시 옵션 페이지에서 입력하세요.
 - 확장 프로그램 특성상 키는 이 브라우저에 로컬 평문으로 저장됩니다. **개인 사용을 전제로 합니다.** 이 브라우저 프로필을 공유하거나, 이 저장소를 포크해 공개 배포하려면 키를 대신 보관·중계하는 프록시 서버가 별도로 필요합니다.
-- `manifest.json`의 `host_permissions`는 실제로 호출하는 4개 API 도메인으로만 한정되어 있습니다 (`<all_urls>` 미사용).
+- `manifest.json`의 `host_permissions`는 실제로 호출하는 3개 API 도메인으로만 한정되어 있습니다 (`<all_urls>` 미사용).
 - 모든 외부 API 호출(키가 든 요청 포함)은 확장 프로그램의 격리된 컨텍스트인 service worker(background.js)에서만 보냅니다.
 
 ## 예상 비용
 
-영상 1건 분석 기준 100원 미만 (댓글 분류: DeepSeek 수 원, 팩트체크 3~5건: Gemini 수 원, 원본 검색: 이미지 3장 거의 0원). 정확한 단가는 각 API 제공사의 최신 요금표를 확인하세요.
+영상 1건 분석 기준 100원 미만 (댓글 분류·주장 추출: Gemini Flash-Lite 수 원 미만, 팩트체크 3~5건: Gemini Pro 수 원, 원본 검색: 이미지 3장 거의 0원). 정확한 단가는 Google AI 최신 요금표를 확인하세요.
 
-## 참고: 팩트체크 모델/툴 이름은 확인이 필요합니다
+## 참고: Gemini 모델 이름은 몇 달 단위로 깨질 수 있습니다
 
-`lib/factcheck.js`의 `GEMINI_MODEL`과 `googleSearch` 그라운딩 툴 키 이름은 2026년 7월 시점 정확한 값을 확인할 수 없어 최선으로 추정해 넣었습니다. 실제 키로 첫 호출을 해보고, 응답에 `groundingMetadata`가 비어 있거나 400 에러가 나면 이 두 값부터 최신 Gemini API 문서 기준으로 교체하세요.
+Gemini 모델은 세대교체가 빠릅니다. 실제로 개발 중 `gemini-2.5-pro`가 셧다운(2026-06-17)됐고, 그 후계 `gemini-3-pro-preview`조차 이미 또 셧다운(2026-03-09)된 걸 확인했습니다. 현재 `lib/gemini.js`는 `gemini-3.1-flash-lite`(GA)와 `gemini-3.1-pro-preview`(preview)를 쓰고 있는데, 이것도 언젠가 또 깨질 수 있습니다.
+
+**증상**: 팩트체크가 `Gemini API error 404: ... is no longer available to new users` 같은 에러로 실패합니다.
+**해결**: [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)에서 현재 사용 가능한 모델 ID를 확인해 `lib/gemini.js`의 `GEMINI_FLASH_LITE_MODEL`/`GEMINI_PRO_MODEL` 상수만 교체하면 됩니다. `googleSearch` 그라운딩 툴 키 이름도 API 버전에 따라 바뀔 수 있으니, 팩트체크 응답에 출처(`groundingMetadata`)가 계속 비어 있으면 이것도 의심하세요.
