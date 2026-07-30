@@ -1,4 +1,4 @@
-const FIELD_IDS = ['youtubeApiKey', 'deepseekApiKey', 'claudeApiKey', 'visionApiKey'];
+const FIELD_IDS = ['youtubeApiKey', 'deepseekApiKey', 'geminiApiKey', 'visionApiKey'];
 
 async function load() {
   const stored = await chrome.storage.local.get(FIELD_IDS);

@@ -1,10 +1,10 @@
-// 댓글 반박 주장 추출(DeepSeek) + 웹서치 기반 팩트체크 판정(Claude) 담당 모듈.
+// 댓글 반박 주장 추출(DeepSeek) + 웹서치 기반 팩트체크 판정(Gemini) 담당 모듈.
 
 // 2026년 7월 기준 실제 DeepSeek 모델 ID를 확인할 수 없어 'deepseek-chat'으로 지정했다.
 const DEEPSEEK_MODEL = 'deepseek-chat';
-// 팩트체크는 프로젝트 코어라 정확도를 우선한다. 오판정 방지를 위해 Opus 계열을 사용.
-const CLAUDE_MODEL = 'claude-opus-5';
-const CLAUDE_API_VERSION = '2023-06-01';
+// 팩트체크는 프로젝트 코어라 정확도를 우선한다.
+// 2026년 7월 기준 실제 Gemini 모델 ID를 확인할 수 없어 임시 지정. 계정에서 쓸 수 있는 최신 모델명으로 교체할 것.
+const GEMINI_MODEL = 'gemini-2.5-pro';
 const VALID_VERDICTS = ['사실', '거짓', '불충분', '부분적 사실'];
 
 const EXTRACT_SYSTEM_PROMPT = `너는 유튜브 댓글에서 검증 가능한 사실 주장을 1개 추출하는 도구다.
@@ -79,92 +79,60 @@ export async function extractClaim(commentText, apiKey) {
   return null;
 }
 
-// Claude API는 브라우저(및 확장 프로그램 service worker)에서의 직접 호출을 기본적으로 막는다.
-// 'anthropic-dangerous-direct-browser-access' 헤더를 명시해야 CORS가 통과한다.
-async function callClaude(messages, apiKey) {
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
+// googleSearch 그라운딩 툴 사용. 필드명은 Gemini API 버전에 따라 바뀔 수 있으니
+// 응답에 groundingMetadata가 비어 있으면 이 부분(툴 키 이름)부터 확인할 것.
+async function callGemini(userText, apiKey) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
-      'content-type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': CLAUDE_API_VERSION,
-      'anthropic-dangerous-direct-browser-access': 'true',
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
     },
     body: JSON.stringify({
-      model: CLAUDE_MODEL,
-      max_tokens: 4096,
-      system: [
-        {
-          type: 'text',
-          text: VERIFY_SYSTEM_PROMPT,
-          cache_control: { type: 'ephemeral' },
-        },
-      ],
-      tools: [{ type: 'web_search_20260209', name: 'web_search', max_uses: 3 }],
-      messages,
+      systemInstruction: { parts: [{ text: VERIFY_SYSTEM_PROMPT }] },
+      contents: [{ role: 'user', parts: [{ text: userText }] }],
+      tools: [{ googleSearch: {} }],
+      generationConfig: { temperature: 0 },
     }),
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => '');
-    throw new Error(`Claude API error ${res.status}: ${text}`);
+    throw new Error(`Gemini API error ${res.status}: ${text}`);
   }
 
   return res.json();
 }
 
-async function runClaudeWithWebSearch(userText, apiKey) {
-  let messages = [{ role: 'user', content: userText }];
-  let data = await callClaude(messages, apiKey);
-
-  // 서버 사이드 웹서치 루프가 반복 한도에 도달하면 pause_turn으로 멈춘다.
-  // 대화 이력을 그대로 이어 붙여 재요청하면 이어서 진행된다.
-  let continuations = 0;
-  while (data.stop_reason === 'pause_turn' && continuations < 2) {
-    messages = [...messages, { role: 'assistant', content: data.content }];
-    data = await callClaude(messages, apiKey);
-    continuations++;
-  }
-
-  return data;
-}
-
 export async function verifyClaim(claim, apiKey) {
-  const data = await runClaudeWithWebSearch(`주장: ${claim}`, apiKey);
+  const data = await callGemini(`주장: ${claim}`, apiKey);
 
-  // Claude Opus 5는 안전 정책상 거부 시 200 응답 + stop_reason: "refusal"을 반환한다.
-  if (data.stop_reason === 'refusal') {
+  // 안전 정책상 차단되면 candidates가 비고 promptFeedback.blockReason이 채워진다.
+  const candidate = data.candidates?.[0];
+  if (data.promptFeedback?.blockReason || !candidate || candidate.finishReason === 'SAFETY') {
     return { verdict: '불충분', reason: '정책상 이 주장은 판정할 수 없습니다.', sources: [] };
   }
 
-  const searchSources = [];
-  const textBlocks = [];
-  for (const block of data.content || []) {
-    if (block.type === 'web_search_tool_result' && Array.isArray(block.content)) {
-      for (const r of block.content) {
-        if (r.type === 'web_search_result' && r.url) {
-          searchSources.push({ url: r.url, title: r.title || r.url });
-        }
-      }
-    } else if (block.type === 'text') {
-      textBlocks.push(block.text);
-    }
-  }
+  const finalText = (candidate.content?.parts || []).map((p) => p.text || '').join('');
+  const groundingSources = (candidate.groundingMetadata?.groundingChunks || [])
+    .map((c) => c.web)
+    .filter(Boolean)
+    .map((w) => ({ url: w.uri, title: w.title || w.uri }));
 
-  const finalText = textBlocks[textBlocks.length - 1] || '';
   const parsed = parseJsonObject(finalText);
 
   if (parsed && VALID_VERDICTS.includes(parsed.verdict)) {
     const sources =
       Array.isArray(parsed.sources) && parsed.sources.length
         ? parsed.sources.slice(0, 5).map((u) => ({ url: u, title: u }))
-        : searchSources.slice(0, 5);
+        : groundingSources.slice(0, 5);
     return { verdict: parsed.verdict, reason: parsed.reason || '', sources };
   }
 
   return {
     verdict: '불충분',
     reason: finalText.slice(0, 300) || '판정 결과를 해석하지 못했습니다.',
-    sources: searchSources.slice(0, 5),
+    sources: groundingSources.slice(0, 5),
   };
 }

@@ -6,7 +6,7 @@ import { extractClaim, verifyClaim } from './lib/factcheck.js';
 import { reverseSearch, extractYoutubeVideoId, extractUrlsFromText } from './lib/reverse-search.js';
 import { getCache, setCache } from './lib/cache.js';
 
-const KEY_NAMES = ['youtubeApiKey', 'deepseekApiKey', 'claudeApiKey', 'visionApiKey'];
+const KEY_NAMES = ['youtubeApiKey', 'deepseekApiKey', 'geminiApiKey', 'visionApiKey'];
 const MAX_FACTCHECK_TARGETS = 5;
 
 chrome.action.onClicked.addListener(() => {
@@ -35,7 +35,7 @@ async function handle(message) {
       return {
         youtube: !!keys.youtubeApiKey,
         deepseek: !!keys.deepseekApiKey,
-        claude: !!keys.claudeApiKey,
+        gemini: !!keys.geminiApiKey,
         vision: !!keys.visionApiKey,
       };
     }
@@ -59,9 +59,9 @@ async function handle(message) {
     }
 
     case 'FACTCHECK_COMMENTS': {
-      const { deepseekApiKey, claudeApiKey } = await getKeys();
-      if (!deepseekApiKey || !claudeApiKey) return { error: 'missing_key' };
-      return await factcheckComments(message.comments, deepseekApiKey, claudeApiKey);
+      const { deepseekApiKey, geminiApiKey } = await getKeys();
+      if (!deepseekApiKey || !geminiApiKey) return { error: 'missing_key' };
+      return await factcheckComments(message.comments, deepseekApiKey, geminiApiKey);
     }
 
     case 'FIND_ORIGINAL': {
@@ -82,7 +82,7 @@ async function handle(message) {
 }
 
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).
-async function factcheckComments(comments, deepseekApiKey, claudeApiKey) {
+async function factcheckComments(comments, deepseekApiKey, geminiApiKey) {
   const topRebuttals = [...comments]
     .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0))
     .slice(0, MAX_FACTCHECK_TARGETS);
@@ -91,7 +91,7 @@ async function factcheckComments(comments, deepseekApiKey, claudeApiKey) {
   for (const comment of topRebuttals) {
     const claim = await extractClaim(comment.textOriginal, deepseekApiKey);
     if (!claim) continue; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
-    const verdict = await verifyClaim(claim, claudeApiKey);
+    const verdict = await verifyClaim(claim, geminiApiKey);
     results.push({ comment: comment.textOriginal, claim, ...verdict });
   }
 
