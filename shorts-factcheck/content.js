@@ -34,8 +34,13 @@
   }
 
   function getVideoIdFromLocation() {
-    const m = location.pathname.match(/^\/shorts\/([^/?#]+)/);
-    return m ? m[1] : null;
+    const shortsMatch = location.pathname.match(/^\/shorts\/([^/?#]+)/);
+    if (shortsMatch) return shortsMatch[1];
+    // 쇼츠 전용이던 것을 일반(롱폼) 영상의 /watch?v= 페이지에서도 동작하도록 확장한다.
+    if (location.pathname === '/watch') {
+      return new URLSearchParams(location.search).get('v') || null;
+    }
+    return null;
   }
 
   // 확장 프로그램이 재로드/업데이트되면 이미 페이지에 주입된 이전 content script 인스턴스는
@@ -93,7 +98,7 @@
     panelEl.id = PANEL_ID;
     panelEl.innerHTML = `
       <div class="sfc-panel-header">
-        <span class="sfc-panel-title">🔍 쇼츠 팩트체크</span>
+        <span class="sfc-panel-title">🔍 영상 팩트체크</span>
         <div class="sfc-panel-controls">
           <button class="sfc-minimize-btn" type="button" title="최소화">─</button>
           <button class="sfc-close-btn" type="button" title="끄기">✕</button>
@@ -133,7 +138,7 @@
     reopenBtnEl = document.createElement('button');
     reopenBtnEl.id = 'sfc-reopen-btn';
     reopenBtnEl.type = 'button';
-    reopenBtnEl.title = '쇼츠 팩트체크 다시 열기';
+    reopenBtnEl.title = '영상 팩트체크 다시 열기';
     reopenBtnEl.textContent = '🔍';
     reopenBtnEl.addEventListener('click', () => {
       panelState = 'expanded';
@@ -358,6 +363,11 @@
   // ---------- 원본 찾기 (버튼 트리거 전용) ----------
 
   function getActiveVideoEl() {
+    // 일반 영상(watch) 페이지에는 사이드바 추천 영상 미리보기용 <video>가 추가로 떠 있을 수 있어,
+    // "화면에 보이는 아무 video"가 아니라 실제 플레이어 컨테이너를 먼저 찾는다.
+    const primary = document.querySelector('#movie_player video, .html5-video-player video');
+    if (primary) return primary;
+
     const videos = Array.from(document.querySelectorAll('video'));
     if (!videos.length) return null;
     const visible = videos.find((v) => {
@@ -568,41 +578,10 @@
       .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
   }
 
-  function parseListTracks(xml) {
-    const tracks = [];
-    const tagRe = /<track\b([^>]*)\/>/g;
-    let m;
-    while ((m = tagRe.exec(xml))) {
-      const attrs = m[1];
-      const langMatch = attrs.match(/lang_code="([^"]*)"/);
-      const kindMatch = attrs.match(/kind="([^"]*)"/);
-      if (langMatch) tracks.push({ langCode: langMatch[1], kind: kindMatch ? kindMatch[1] : null });
-    }
-    return tracks;
-  }
-
-  async function fetchTracksFromListEndpoint(videoId) {
-    const res = await fetch(`https://www.youtube.com/api/timedtext?type=list&v=${videoId}`);
-    if (!res.ok) return [];
-    return parseListTracks(await res.text());
-  }
-
-  function buildFallbackTimedtextUrl(videoId, track) {
-    const params = new URLSearchParams({ v: videoId, lang: track.langCode });
-    if (track.kind) params.set('kind', track.kind);
-    return `https://www.youtube.com/api/timedtext?${params.toString()}`;
-  }
-
+  // baseUrl은 페이지의 player.js가 이미 서명/토큰까지 계산해 완성해둔 URL이다.
+  // 쿼리 파라미터를 하나라도 건드리면(순서 변경, 삭제 등) 서명 검증에 걸려 200 OK인데
+  // 본문만 빈 채로 오므로, 절대 수정하지 않고 그대로 fetch한다.
   async function fetchOneTrackUrl(url) {
-    try {
-      // baseUrl에 fmt 파라미터가 이미 들어있으면 WebVTT/JSON3 등 우리 정규식이 못 읽는
-      // 형식으로 올 수 있어, 항상 기본 XML(<text> 태그) 형식이 오도록 fmt를 제거한다.
-      const u = new URL(url);
-      u.searchParams.delete('fmt');
-      url = u.toString();
-    } catch {
-      // baseUrl이 상대경로 등 URL 파싱이 안 되면 원본 그대로 시도
-    }
     const res = await fetch(url);
     if (!res.ok) {
       console.warn('[SFC transcript] track fetch not ok', url, res.status);
@@ -616,30 +595,33 @@
     return text;
   }
 
-  async function fetchTrackText(videoId, track) {
-    if (track.baseUrl) {
-      const text = await fetchOneTrackUrl(track.baseUrl);
-      if (text) return text;
-      console.warn('[SFC transcript] baseUrl fetch empty, trying fallback timedtext URL', videoId);
+  // background.js를 거쳐 유튜브 페이지의 메인 월드(content script의 격리된 세계가 아니라
+  // 페이지 자신의 JS 컨텍스트)에서 window.ytInitialPlayerResponse(또는 플레이어 객체)를
+  // 직접 읽어온다. 이렇게 얻은 baseUrl은 브라우저가 실제로 그 영상을 재생하며 player.js가
+  // 만들어낸 것이라 서명/토큰이 완전하다 — 우리가 별도로 watch 페이지를 다시 fetch해서
+  // 파싱한 것보다 훨씬 신뢰할 수 있다.
+  async function fetchTracksFromMainWorld() {
+    try {
+      const res = await sendMessage({ type: 'GET_CAPTION_TRACKS' });
+      return Array.isArray(res?.tracks) ? res.tracks : [];
+    } catch {
+      return [];
     }
-    const fallbackText = await fetchOneTrackUrl(buildFallbackTimedtextUrl(videoId, track));
-    if (!fallbackText) console.warn('[SFC transcript] fallback timedtext URL also empty', videoId, track);
-    return fallbackText;
   }
 
   // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
   // 'no_tracks' | 'empty_track' | 'error' | 'ok'
   async function fetchTranscript(videoId) {
     try {
-      let tracks = await fetchTracksFromWatchPage(videoId);
-      if (!tracks.length) {
-        tracks = await fetchTracksFromListEndpoint(videoId);
-      }
+      // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기 (가장 신뢰도 높음 — 서명/토큰이 완전하다)
+      let tracks = await fetchTracksFromMainWorld();
+      // 2) watch 페이지를 다시 fetch해 정적 HTML에서 파싱 (SPA 전환 직후라 아직 갱신 안 된 경우 등의 폴백)
+      if (!tracks.length) tracks = await fetchTracksFromWatchPage(videoId);
 
       const track = pickTranscriptTrack(tracks);
-      if (!track) return { text: null, reason: 'no_tracks' };
+      if (!track || !track.baseUrl) return { text: null, reason: 'no_tracks' };
 
-      const text = await fetchTrackText(videoId, track);
+      const text = await fetchOneTrackUrl(track.baseUrl);
       return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };
     } catch (err) {
       console.error('[SFC transcript] unexpected error', videoId, err);

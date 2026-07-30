@@ -3,7 +3,7 @@
   "name": "유튜브 쇼츠 팩트체크",
   "version": "0.1.0",
   "description": "유튜브 쇼츠 댓글 여론을 분류하고, 반박 댓글을 웹 검색 기반으로 팩트체크하며, 버튼 클릭 시 원본 영상을 역방향 이미지 검색으로 추적합니다.",
-  "permissions": ["storage"],
+  "permissions": ["storage", "scripting"],
   "host_permissions": [
     "https://www.googleapis.com/*",
     "https://www.youtube.com/*",

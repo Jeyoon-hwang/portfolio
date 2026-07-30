@@ -13,8 +13,8 @@ chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
 });
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  handle(message)
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  handle(message, sender)
     .then(sendResponse)
     .catch((err) => sendResponse({ error: true, message: err?.message || String(err) }));
   return true; // 비동기 sendResponse를 위해 채널을 열어둔다
@@ -24,7 +24,31 @@ async function getKeys() {
   return chrome.storage.local.get(KEY_NAMES);
 }
 
-async function handle(message) {
+// content script(격리된 세계)가 아니라 유튜브 페이지 자신의 메인 월드에서 실행되어,
+// 페이지의 player.js가 이미 계산해놓은 서명/토큰이 포함된 caption baseUrl을 그대로 읽어온다.
+// 우리가 직접 fetch로 watch 페이지를 다시 받아서 파싱하면, 그 응답엔 브라우저가 실제로 실행한
+// player.js가 나중에 채워 넣는 값(예: pot 토큰)이 빠져 있을 수 있다 — 서명 검증에 걸려
+// 200 OK인데 본문이 빈 응답으로 오는 증상과 정확히 들어맞는다.
+function mainWorldGetCaptionTracks() {
+  try {
+    let playerResponse = window.ytInitialPlayerResponse;
+    if (!playerResponse || !playerResponse.captions) {
+      const player = document.querySelector('#movie_player');
+      if (player && typeof player.getPlayerResponse === 'function') {
+        playerResponse = player.getPlayerResponse();
+      }
+    }
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!Array.isArray(tracks)) return [];
+    return tracks
+      .filter((t) => t && t.baseUrl)
+      .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
+  } catch {
+    return [];
+  }
+}
+
+async function handle(message, sender) {
   switch (message.type) {
     case 'OPEN_OPTIONS':
       chrome.runtime.openOptionsPage();
@@ -49,6 +73,20 @@ async function handle(message) {
       const { youtubeApiKey } = await getKeys();
       if (!youtubeApiKey) return { error: 'missing_key' };
       return await fetchComments(message.videoId, youtubeApiKey);
+    }
+
+    case 'GET_CAPTION_TRACKS': {
+      if (!sender?.tab?.id) return { tracks: [] };
+      try {
+        const [injection] = await chrome.scripting.executeScript({
+          target: { tabId: sender.tab.id },
+          world: 'MAIN',
+          func: mainWorldGetCaptionTracks,
+        });
+        return { tracks: Array.isArray(injection?.result) ? injection.result : [] };
+      } catch {
+        return { tracks: [] };
+      }
     }
 
     // 자막 자체는 content.js가 유튜브 페이지 컨텍스트(같은 origin, 실제 쿠키/세션)에서

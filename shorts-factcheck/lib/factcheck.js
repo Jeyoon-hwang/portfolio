@@ -79,9 +79,11 @@ export async function extractClaim(commentText, apiKey, context) {
 }
 
 // 자막이 없는 쇼츠(노래/밈 클립 등)가 많으므로 transcript가 null이면 그냥 null을 반환한다.
+// 롱폼 영상까지 지원하면서 자막이 훨씬 길어질 수 있어, 쇼츠 기준(4000자)보다 넉넉히 늘렸다 —
+// Flash-Lite는 컨텍스트가 넓어 비용/속도 영향은 미미하다.
 export async function extractVideoClaim(transcript, apiKey) {
   if (!transcript) return null;
-  const userPrompt = `자막: ${transcript.slice(0, 4000)}`;
+  const userPrompt = `자막: ${transcript.slice(0, 20000)}`;
 
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
