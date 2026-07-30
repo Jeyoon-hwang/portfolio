@@ -339,6 +339,12 @@
       setSectionBody('factcheck', '<p class="sfc-note">일일 한도 초과로 진행할 수 없습니다.</p>');
       return;
     }
+    if (commentsRes.error) {
+      // 'missing_key'나 예상 못 한 예외(예: API 키 제한 설정 문제)를 "댓글 0개"로 오인하지 않도록 별도 처리
+      setSectionBody('comments', `<p class="sfc-note">댓글을 불러오지 못했습니다: ${escapeHtml(commentsRes.message || commentsRes.error)}</p>`);
+      setSectionBody('factcheck', '<p class="sfc-note">댓글을 불러오지 못해 팩트체크를 진행할 수 없습니다.</p>');
+      return;
+    }
 
     const comments = commentsRes.comments || [];
     if (!comments.length) {
@@ -349,6 +355,11 @@
 
     const classifyRes = await sendMessage({ type: 'CLASSIFY_COMMENTS', comments });
     if (token !== runToken) return;
+    if (classifyRes.error) {
+      setSectionBody('comments', `<p class="sfc-note">댓글 분류에 실패했습니다: ${escapeHtml(classifyRes.message || classifyRes.error)}</p>`);
+      setSectionBody('factcheck', '<p class="sfc-note">댓글 분류 실패로 팩트체크를 진행할 수 없습니다.</p>');
+      return;
+    }
     renderCommentsSection(classifyRes.percentages);
 
     const rebuttalComments = classifyRes.classified.filter((c) => c.category === 'rebuttal');
@@ -358,6 +369,10 @@
     if (rebuttalComments.length) {
       const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments });
       if (token !== runToken) return;
+      if (fcRes.error) {
+        setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
+        return;
+      }
       factchecks = fcRes.factchecks || [];
     }
     renderFactcheckSection(factchecks);
