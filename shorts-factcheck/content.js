@@ -196,9 +196,18 @@
       .map(
         (item) => `
           <div class="sfc-original-item">
-            <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.domain)}</a>
-            ${item.uploadDate ? `<span class="sfc-original-date">${escapeHtml(new Date(item.uploadDate).toLocaleDateString('ko-KR'))}</span>` : ''}
-            ${item.isOriginalGuess ? '<span class="sfc-original-badge">원본 추정</span>' : ''}
+            ${
+              item.thumbnail
+                ? `<img class="sfc-original-thumb" src="${escapeHtml(item.thumbnail)}" alt="" loading="lazy" />`
+                : '<div class="sfc-original-thumb sfc-original-thumb-placeholder">🔗</div>'
+            }
+            <div class="sfc-original-info">
+              <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.domain)}</a>
+              <div class="sfc-original-meta">
+                ${item.uploadDate ? `<span class="sfc-original-date">${escapeHtml(new Date(item.uploadDate).toLocaleDateString('ko-KR'))}</span>` : ''}
+                ${item.isOriginalGuess ? '<span class="sfc-original-badge">원본 추정</span>' : ''}
+              </div>
+            </div>
           </div>
         `,
       )

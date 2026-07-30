@@ -97,12 +97,43 @@ async function factcheckComments(comments, geminiApiKey) {
   return { factchecks: results };
 }
 
+// Vision Web Detection은 화면 워터마크(녹화 프로그램 로고 등)처럼 영상 내용과 무관한
+// 시각 요소로도 매칭되어 스크린샷/튜토리얼 사이트 같은 완전히 무관한 후보를 던질 수 있다.
+// "원본 영상"을 찾는 게 목적이므로 실제 영상 플랫폼 도메인만 후보로 남긴다.
+const VIDEO_HOSTS = [
+  'youtube.com',
+  'youtu.be',
+  'tiktok.com',
+  'instagram.com',
+  'facebook.com',
+  'fb.watch',
+  'twitter.com',
+  'x.com',
+  'vimeo.com',
+  'dailymotion.com',
+  'twitch.tv',
+  'kakao.com',
+  'naver.com',
+  'bilibili.com',
+  'reddit.com',
+];
+
+function isVideoPlatformUrl(url) {
+  try {
+    const host = new URL(url).hostname.replace(/^www\./, '');
+    return VIDEO_HOSTS.some((p) => host === p || host.endsWith('.' + p));
+  } catch {
+    return false;
+  }
+}
+
 async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey) {
   let candidateUrls = [];
 
   if (visionApiKey && frames && frames.length) {
     try {
-      candidateUrls = await reverseSearch(frames, visionApiKey);
+      const urls = await reverseSearch(frames, visionApiKey);
+      candidateUrls = urls.filter(isVideoPlatformUrl);
     } catch {
       // Vision 검색 실패 시 아래 댓글 URL 폴백으로 진행
     }
@@ -140,7 +171,9 @@ async function buildResultItems(urls, youtubeApiKey) {
     if (videoId && youtubeApiKey) {
       uploadDate = await fetchUploadDate(videoId, youtubeApiKey);
     }
-    items.push({ url, domain: safeHostname(url), videoId, uploadDate });
+    // 유튜브 영상이면 API 호출 없이 공개 썸네일 URL을 바로 쓸 수 있다.
+    const thumbnail = videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : null;
+    items.push({ url, domain: safeHostname(url), videoId, uploadDate, thumbnail });
   }
   return items;
 }
