@@ -1,9 +1,13 @@
 // Gemini generateContent 공통 호출 유틸.
 // 댓글 분류, 주장 추출, 팩트체크 판정이 전부 이 함수를 통해 호출된다.
-// 2026년 7월 기준 정확한 모델 ID를 확인할 수 없어 아래 두 모델명은 추정치다.
-// 계정에서 사용 가능한 최신 모델명으로 교체할 것.
-export const GEMINI_FLASH_LITE_MODEL = 'gemini-2.5-flash-lite';
-export const GEMINI_PRO_MODEL = 'gemini-2.5-pro';
+//
+// 2026-07-30 기준: gemini-2.5-pro는 이미 셧다운(2026-06-17)됐고, 그 후계였던
+// gemini-3-pro-preview조차 벌써 또 셧다운(2026-03-09, gemini-3.1-pro-preview로 교체)됐다.
+// Gemini 모델 세대교체가 몇 달 단위로 도는 상황이라 이 상수들은 또 깨질 수 있다.
+// 404 + "no longer available" 에러가 나면 https://ai.google.dev/gemini-api/docs/models 에서
+// 최신 모델 ID로 교체할 것.
+export const GEMINI_FLASH_LITE_MODEL = 'gemini-3.1-flash-lite'; // 정식 GA
+export const GEMINI_PRO_MODEL = 'gemini-3.1-pro-preview'; // preview — 다시 바뀔 수 있음
 
 export async function callGemini(model, systemPrompt, userText, apiKey, tools) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`;

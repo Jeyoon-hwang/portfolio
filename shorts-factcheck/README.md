@@ -63,6 +63,9 @@ content script는 유튜브 페이지와 컨텍스트를 공유하고 CSP 제약
 
 영상 1건 분석 기준 100원 미만 (댓글 분류·주장 추출: Gemini Flash-Lite 수 원 미만, 팩트체크 3~5건: Gemini Pro 수 원, 원본 검색: 이미지 3장 거의 0원). 정확한 단가는 Google AI 최신 요금표를 확인하세요.
 
-## 참고: Gemini 모델/툴 이름은 확인이 필요합니다
+## 참고: Gemini 모델 이름은 몇 달 단위로 깨질 수 있습니다
 
-`lib/gemini.js`의 `GEMINI_FLASH_LITE_MODEL`(`gemini-2.5-flash-lite`), `GEMINI_PRO_MODEL`(`gemini-2.5-pro`)과 `googleSearch` 그라운딩 툴 키 이름은 2026년 7월 시점 정확한 값을 확인할 수 없어 최선으로 추정해 넣었습니다. 실제 키로 첫 호출을 해보고, 400 에러가 나거나 팩트체크 응답에 `groundingMetadata`가 비어 있으면 이 값들부터 최신 Gemini API 문서 기준으로 교체하세요.
+Gemini 모델은 세대교체가 빠릅니다. 실제로 개발 중 `gemini-2.5-pro`가 셧다운(2026-06-17)됐고, 그 후계 `gemini-3-pro-preview`조차 이미 또 셧다운(2026-03-09)된 걸 확인했습니다. 현재 `lib/gemini.js`는 `gemini-3.1-flash-lite`(GA)와 `gemini-3.1-pro-preview`(preview)를 쓰고 있는데, 이것도 언젠가 또 깨질 수 있습니다.
+
+**증상**: 팩트체크가 `Gemini API error 404: ... is no longer available to new users` 같은 에러로 실패합니다.
+**해결**: [ai.google.dev/gemini-api/docs/models](https://ai.google.dev/gemini-api/docs/models)에서 현재 사용 가능한 모델 ID를 확인해 `lib/gemini.js`의 `GEMINI_FLASH_LITE_MODEL`/`GEMINI_PRO_MODEL` 상수만 교체하면 됩니다. `googleSearch` 그라운딩 툴 키 이름도 API 버전에 따라 바뀔 수 있으니, 팩트체크 응답에 출처(`groundingMetadata`)가 계속 비어 있으면 이것도 의심하세요.
