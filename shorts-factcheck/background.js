@@ -29,17 +29,50 @@ async function getKeys() {
 // 우리가 직접 fetch로 watch 페이지를 다시 받아서 파싱하면, 그 응답엔 브라우저가 실제로 실행한
 // player.js가 나중에 채워 넣는 값(예: pot 토큰)이 빠져 있을 수 있다 — 서명 검증에 걸려
 // 200 OK인데 본문이 빈 응답으로 오는 증상과 정확히 들어맞는다.
+//
+// 실측 결과 일반 /watch 페이지의 #movie_player + window.ytInitialPlayerResponse로는 쇼츠에서
+// 트랙을 못 찾았다 — 쇼츠는 세로 피드로 영상이 넘어갈 때 SPA 전환이라 이 전역이 갱신되지 않고,
+// 플레이어 컨테이너 자체도 다른 구조를 쓰는 것으로 보인다. 정확한 내부 구조를 실제 브라우저
+// 없이는 확신할 수 없어, 알려진 후보를 여러 개 순서대로 시도한다.
 function mainWorldGetCaptionTracks() {
+  function tracksFrom(playerResponse) {
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    return Array.isArray(tracks) && tracks.length ? tracks : null;
+  }
+
   try {
-    let playerResponse = window.ytInitialPlayerResponse;
-    if (!playerResponse || !playerResponse.captions) {
-      const player = document.querySelector('#movie_player');
-      if (player && typeof player.getPlayerResponse === 'function') {
-        playerResponse = player.getPlayerResponse();
+    let tracks = tracksFrom(window.ytInitialPlayerResponse);
+
+    if (!tracks) {
+      const moviePlayer = document.querySelector('#movie_player');
+      if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
+        tracks = tracksFrom(moviePlayer.getPlayerResponse());
       }
     }
-    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!Array.isArray(tracks)) return [];
+
+    if (!tracks) {
+      // 쇼츠 전용 플레이어 컨테이너로 알려진/추정되는 후보들. 정확한 구조를 확신할 수 없어
+      // 여러 셀렉터를 넓게 시도하고, getPlayerResponse를 제공하는 첫 번째 것을 쓴다.
+      const candidates = document.querySelectorAll(
+        '#shorts-player, ytd-reel-video-renderer[is-active] #player, ytd-reel-video-renderer #player, ytd-shorts [id*="player"]',
+      );
+      for (const el of candidates) {
+        if (el && typeof el.getPlayerResponse === 'function') {
+          tracks = tracksFrom(el.getPlayerResponse());
+          if (tracks) break;
+        }
+      }
+    }
+
+    if (!tracks) {
+      // 마지막 수단: 페이지 안의 모든 후보 엘리먼트 중 getPlayerResponse를 제공하는 것을 훑는다.
+      const anyPlayerEl = Array.from(document.querySelectorAll('[id*="player"]')).find(
+        (el) => typeof el.getPlayerResponse === 'function',
+      );
+      if (anyPlayerEl) tracks = tracksFrom(anyPlayerEl.getPlayerResponse());
+    }
+
+    if (!tracks) return [];
     return tracks
       .filter((t) => t && t.baseUrl)
       .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
