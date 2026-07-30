@@ -6,6 +6,11 @@ const VALID_VERDICTS = ['사실', '거짓', '불충분', '부분적 사실'];
 
 const EXTRACT_SYSTEM_PROMPT = `너는 유튜브 댓글에서 검증 가능한 사실 주장을 1개 추출하는 도구다.
 댓글이 단순 욕설, 감정 표현, 검증 불가능한 개인 의견이면 주장이 없다고 판단하라.
+
+영상 맥락이나 원댓글(답글인 경우) 맥락이 함께 주어질 수 있다. 댓글 자체만 보면 "누구의/어느 기관의/무슨 사건에 대한" 얘기인지
+불분명한 경우, 주어진 맥락을 참고해 주장을 더 구체적으로 표현하라 (예: "게시글이 삭제됐다" → "OO시청 계곡 불법영업 논란 게시글이 삭제됐다").
+단, 맥락에 실제로 나오지 않는 내용을 추측해서 채워넣지는 마라 — 맥락이 없거나 관련이 없으면 댓글 내용 그대로만 정리하라.
+
 출력은 반드시 JSON 객체 하나만 출력하라.
 주장이 있으면: {"has_claim":true,"claim":"검증 가능한 형태로 정리한 주장 한 문장"}
 주장이 없으면: {"has_claim":false}
@@ -40,8 +45,12 @@ function parseJsonObject(raw) {
   }
 }
 
-export async function extractClaim(commentText, apiKey) {
-  const userPrompt = `댓글: ${(commentText || '').replace(/\n+/g, ' ').slice(0, 800)}`;
+export async function extractClaim(commentText, apiKey, context) {
+  const lines = [];
+  if (context?.videoClaim) lines.push(`영상 주장: ${context.videoClaim}`);
+  if (context?.parentText) lines.push(`원댓글(이 댓글이 답글로 달린 대상): ${context.parentText.replace(/\n+/g, ' ').slice(0, 300)}`);
+  lines.push(`댓글: ${(commentText || '').replace(/\n+/g, ' ').slice(0, 800)}`);
+  const userPrompt = lines.join('\n');
 
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
@@ -90,18 +99,25 @@ export async function verifyClaim(claim, apiKey, videoClaim) {
 
   const candidate = data.candidates[0];
   const finalText = extractGeminiText(data);
+  // Gemini의 groundingMetadata가 주는 web.uri는 실제 사이트 URL이 아니라
+  // vertexaisearch.cloud.google.com/grounding-api-redirect/... 형태의 리다이렉트다.
+  // 클릭하면 실제 출처로 넘어가므로 링크로는 문제없지만, 화면에 보여줄 제목은
+  // 이 긴 리다이렉트 문자열이 아니라 web.title(대개 사이트/기사명)을 써야 한다.
   const groundingSources = (candidate.groundingMetadata?.groundingChunks || [])
     .map((c) => c.web)
     .filter(Boolean)
-    .map((w) => ({ url: w.uri, title: w.title || w.uri }));
+    .map((w) => ({ url: w.uri, title: w.title || null }));
 
   const parsed = parseJsonObject(finalText);
 
+  // groundingMetadata가 구조화된 실제 출처 정보라, 모델이 텍스트로 직접 적어낸
+  // sources 배열(리다이렉트 URL을 그대로 베껴 적는 경우가 많음)보다 우선한다.
   if (parsed && VALID_VERDICTS.includes(parsed.verdict)) {
     const sources =
-      Array.isArray(parsed.sources) && parsed.sources.length
-        ? parsed.sources.slice(0, 5).map((u) => ({ url: u, title: u }))
-        : groundingSources.slice(0, 5);
+      groundingSources.length ? groundingSources.slice(0, 5)
+      : Array.isArray(parsed.sources) && parsed.sources.length
+        ? parsed.sources.slice(0, 5).map((u) => ({ url: u, title: null }))
+        : [];
     return { verdict: parsed.verdict, reason: parsed.reason || '', sources };
   }
 

@@ -5,12 +5,33 @@
   'use strict';
 
   const PANEL_ID = 'sfc-panel';
+  const PANEL_STATE_KEY = 'sfcPanelState';
   let panelEl = null;
+  let reopenBtnEl = null;
+  let panelState = 'expanded'; // 'expanded' | 'minimized' | 'hidden' — 쇼츠 전체에 적용되는 전역 설정
   let currentVideoId = null;
+  let lastAnalyzedVideoId = null; // 패널에 지금 표시된 내용이 어느 영상 것인지 (꺼진 동안 영상이 바뀌었는지 판단용)
   let currentSourceComments = [];
   let runToken = 0; // 빠른 스크롤 중 이전 분석 결과가 늦게 도착해 덮어쓰는 것을 방지
   let pollTimerId = null;
   let contextInvalidated = false;
+
+  async function loadPanelState() {
+    try {
+      const stored = await chrome.storage.local.get(PANEL_STATE_KEY);
+      if (stored[PANEL_STATE_KEY]) panelState = stored[PANEL_STATE_KEY];
+    } catch {
+      // 저장된 값을 못 읽으면 기본값(expanded) 유지
+    }
+  }
+
+  async function savePanelState() {
+    try {
+      await chrome.storage.local.set({ [PANEL_STATE_KEY]: panelState });
+    } catch {
+      // 컨텍스트 무효화 등으로 저장 실패해도 화면 동작에는 지장 없으니 무시
+    }
+  }
 
   function getVideoIdFromLocation() {
     const m = location.pathname.match(/^\/shorts\/([^/?#]+)/);
@@ -70,8 +91,19 @@
     if (panelEl && document.documentElement.contains(panelEl)) return panelEl;
     panelEl = document.createElement('div');
     panelEl.id = PANEL_ID;
+    panelEl.innerHTML = `
+      <div class="sfc-panel-header">
+        <span class="sfc-panel-title">🔍 쇼츠 팩트체크</span>
+        <div class="sfc-panel-controls">
+          <button class="sfc-minimize-btn" type="button" title="최소화">─</button>
+          <button class="sfc-close-btn" type="button" title="끄기">✕</button>
+        </div>
+      </div>
+      <div class="sfc-panel-body"></div>
+    `;
     document.documentElement.appendChild(panelEl);
     panelEl.addEventListener('click', onPanelClick);
+    applyPanelState();
     return panelEl;
   }
 
@@ -82,8 +114,50 @@
     }
   }
 
+  function applyPanelState() {
+    if (!panelEl) return;
+    if (panelState === 'hidden') {
+      panelEl.style.display = 'none';
+      showReopenButton();
+      return;
+    }
+    panelEl.style.display = '';
+    hideReopenButton();
+    panelEl.classList.toggle('sfc-minimized', panelState === 'minimized');
+    const minimizeBtn = panelEl.querySelector('.sfc-minimize-btn');
+    if (minimizeBtn) minimizeBtn.textContent = panelState === 'minimized' ? '▢' : '─';
+  }
+
+  function showReopenButton() {
+    if (reopenBtnEl) return;
+    reopenBtnEl = document.createElement('button');
+    reopenBtnEl.id = 'sfc-reopen-btn';
+    reopenBtnEl.type = 'button';
+    reopenBtnEl.title = '쇼츠 팩트체크 다시 열기';
+    reopenBtnEl.textContent = '🔍';
+    reopenBtnEl.addEventListener('click', () => {
+      panelState = 'expanded';
+      savePanelState();
+      applyPanelState();
+      // 꺼져 있던 동안 영상이 바뀌었을 수 있으니, 지금 표시된 내용이 현재 영상 것이 아니면 다시 분석한다.
+      if (currentVideoId && lastAnalyzedVideoId !== currentVideoId) {
+        runToken++;
+        startAnalysisFor(currentVideoId, runToken);
+      }
+    });
+    document.documentElement.appendChild(reopenBtnEl);
+  }
+
+  function hideReopenButton() {
+    if (reopenBtnEl) {
+      reopenBtnEl.remove();
+      reopenBtnEl = null;
+    }
+  }
+
   function renderSkeleton() {
-    panelEl.innerHTML = `
+    const body = panelEl.querySelector('.sfc-panel-body');
+    body.innerHTML = `
       <div class="sfc-section" data-section="comments">
         <div class="sfc-section-header"><span>댓글 여론</span><button class="sfc-toggle" type="button">▾</button></div>
         <div class="sfc-section-body"><div class="sfc-skeleton"></div></div>
@@ -108,6 +182,20 @@
   }
 
   function onPanelClick(e) {
+    const minimizeBtn = e.target.closest('.sfc-minimize-btn');
+    if (minimizeBtn) {
+      panelState = panelState === 'minimized' ? 'expanded' : 'minimized';
+      savePanelState();
+      applyPanelState();
+      return;
+    }
+    const closeBtn = e.target.closest('.sfc-close-btn');
+    if (closeBtn) {
+      panelState = 'hidden';
+      savePanelState();
+      applyPanelState();
+      return;
+    }
     const toggleBtn = e.target.closest('.sfc-toggle');
     if (toggleBtn) {
       toggleBtn.closest('.sfc-section')?.classList.toggle('sfc-collapsed');
@@ -167,10 +255,13 @@
     const repHtml = CATEGORY_ORDER.filter((key) => representative && representative[key])
       .map((key) => {
         const c = representative[key];
+        const full = (c.textOriginal || '').replace(/\n+/g, ' ');
+        // 화면엔 말줄임표로 잘려 보이니, title로 hover 시 전체 댓글을 볼 수 있게 한다
         return `
           <div class="sfc-rep-comment">
             <span class="sfc-rep-tag" style="background:${CATEGORY_COLORS[key]}">${CATEGORY_LABELS[key]}</span>
-            <span class="sfc-rep-text">${escapeHtml((c.textOriginal || '').replace(/\n+/g, ' ').slice(0, 60))}</span>
+            ${c.isReply ? '<span class="sfc-rep-reply-badge" title="답글(대댓글)입니다">↳답글</span>' : ''}
+            <span class="sfc-rep-text" title="${escapeHtml(full)}">${escapeHtml(full.slice(0, 60))}</span>
             <span class="sfc-rep-likes">👍${c.likeCount || 0}</span>
           </div>
         `;
@@ -199,7 +290,8 @@
     const html = factchecks
       .map((fc) => {
         const sources = (fc.sources || [])
-          .map((s) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || s.url)}</a>`)
+          // 출처 title이 없으면 리다이렉트 URL 원문 대신 짧은 대체 라벨을 보여준다
+          .map((s, i) => `<a href="${escapeHtml(s.url)}" target="_blank" rel="noopener">${escapeHtml(s.title || `참고 자료 ${i + 1}`)}</a>`)
           .join(' · ');
         return `
           <div class="sfc-factcheck-item">
@@ -235,7 +327,7 @@
                 : '<div class="sfc-original-thumb sfc-original-thumb-placeholder">🔗</div>'
             }
             <div class="sfc-original-info">
-              <a href="${escapeHtml(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.domain)}</a>
+              <a href="${escapeHtml(item.url)}" title="${escapeHtml(item.url)}" target="_blank" rel="noopener">${escapeHtml(item.domain)}</a>
               <div class="sfc-original-meta">
                 ${item.uploadDate ? `<span class="sfc-original-date">${escapeHtml(new Date(item.uploadDate).toLocaleDateString('ko-KR'))}</span>` : ''}
                 ${item.isOriginalGuess ? '<span class="sfc-original-badge">원본 추정</span>' : ''}
@@ -452,9 +544,22 @@
 
     if (!videoId) {
       removePanel();
+      hideReopenButton();
       return;
     }
 
+    // 꺼진 상태에서는 API 호출도 하지 않는다 — currentVideoId만 갱신해두고
+    // 다시 켤 때(🔍 버튼) 그 시점의 영상을 분석한다.
+    if (panelState === 'hidden') {
+      showReopenButton();
+      return;
+    }
+
+    startAnalysisFor(videoId, token);
+  }
+
+  function startAnalysisFor(videoId, token) {
+    lastAnalyzedVideoId = videoId;
     ensurePanel();
     renderSkeleton();
     runAnalysis(videoId, token).catch((err) => {
@@ -474,16 +579,20 @@
     onVideoChange(videoId);
   }
 
-  document.addEventListener('yt-navigate-finish', checkRoute);
-  window.addEventListener('popstate', checkRoute);
+  (async function init() {
+    await loadPanelState(); // 첫 렌더 전에 저장된 최소화/끄기 상태부터 읽어온다
 
-  const titleEl = document.querySelector('title');
-  if (titleEl) {
-    new MutationObserver(checkRoute).observe(titleEl, { childList: true });
-  }
+    document.addEventListener('yt-navigate-finish', checkRoute);
+    window.addEventListener('popstate', checkRoute);
 
-  // 위 이벤트들을 놓치는 경우를 위한 최후의 폴백 (SPA 라우팅 감지 실패는 전체 기능을 무너뜨리므로 이중 삼중으로 방어한다)
-  pollTimerId = setInterval(checkRoute, 1000);
+    const titleEl = document.querySelector('title');
+    if (titleEl) {
+      new MutationObserver(checkRoute).observe(titleEl, { childList: true });
+    }
 
-  checkRoute();
+    // 위 이벤트들을 놓치는 경우를 위한 최후의 폴백 (SPA 라우팅 감지 실패는 전체 기능을 무너뜨리므로 이중 삼중으로 방어한다)
+    pollTimerId = setInterval(checkRoute, 1000);
+
+    checkRoute();
+  })();
 })();

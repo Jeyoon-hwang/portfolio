@@ -25,7 +25,14 @@ const SYSTEM_PROMPT = `너는 유튜브 쇼츠 댓글을 4개 카테고리 중 �
 
 function buildUserPrompt(batch) {
   return batch
-    .map((c, i) => `${i}: ${(c.textOriginal || '').replace(/\n+/g, ' ').slice(0, 500)}`)
+    .map((c, i) => {
+      const text = (c.textOriginal || '').replace(/\n+/g, ' ').slice(0, 500);
+      // 답글은 원댓글 없이는 무슨 얘기인지 알 수 없는 경우가 많아 짧게 맥락을 붙여준다.
+      const prefix = c.isReply && c.parentText
+        ? `[답글, 원댓글: "${c.parentText.replace(/\n+/g, ' ').slice(0, 100)}"] `
+        : '';
+      return `${i}: ${prefix}${text}`;
+    })
     .join('\n');
 }
 

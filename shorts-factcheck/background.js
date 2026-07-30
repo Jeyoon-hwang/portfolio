@@ -101,7 +101,10 @@ async function factcheckComments(comments, geminiApiKey, videoClaim) {
 
   const results = await Promise.all(
     topRebuttals.map(async (comment) => {
-      const claim = await extractClaim(comment.textOriginal, geminiApiKey);
+      const claim = await extractClaim(comment.textOriginal, geminiApiKey, {
+        videoClaim,
+        parentText: comment.isReply ? comment.parentText : null,
+      });
       if (!claim) return null; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
       const verdict = await verifyClaim(claim, geminiApiKey, videoClaim);
       return { comment: comment.textOriginal, claim, ...verdict };
