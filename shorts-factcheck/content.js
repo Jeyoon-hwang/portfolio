@@ -610,11 +610,44 @@
     }
   }
 
+  // 유튜브 웹플레이어 자신이 내부적으로 호출하는 Innertube player 엔드포인트를 그대로 쓴다.
+  // 요청 시점 기준으로 새로 서명된 caption baseUrl을 돌려주므로, 우리가 다시 만든 watch 페이지
+  // 스냅샷보다 신선하다. 이 키(WEB 클라이언트용)는 2020년 무렵부터 yt-dlp 등에서 공개적으로
+  // 써온 값이라 언젠가 유튜브가 로테이션하거나 막을 수 있다 — 그러면 이 함수만 갱신하면 된다.
+  // content script가 youtube.com origin에서 실행되므로 same-origin이라 CORS 문제가 없다.
+  const INNERTUBE_API_KEY = 'AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8';
+
+  async function fetchTracksViaInnertube(videoId) {
+    try {
+      const res = await fetch(`https://www.youtube.com/youtubei/v1/player?key=${INNERTUBE_API_KEY}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          videoId,
+          context: { client: { clientName: 'WEB', clientVersion: '2.20240101.00.00', hl: 'ko' } },
+        }),
+      });
+      if (!res.ok) {
+        console.warn('[SFC transcript] innertube player call failed', res.status);
+        return [];
+      }
+      const data = await res.json();
+      const tracks = data?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+      if (!Array.isArray(tracks)) return [];
+      return tracks
+        .filter((t) => t && t.baseUrl)
+        .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
+    } catch (err) {
+      console.warn('[SFC transcript] innertube player call errored', err?.message || err);
+      return [];
+    }
+  }
+
   // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
   // 'no_tracks' | 'empty_track' | 'error' | 'ok'
   async function fetchTranscript(videoId) {
     try {
-      // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기 (가장 신뢰도 높음 — 서명/토큰이 완전하다)
+      // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기
       let tracks = await fetchTracksFromMainWorld();
       let source = 'mainWorld';
       console.info('[SFC transcript] mainWorld tracks:', tracks.length);
@@ -624,14 +657,30 @@
         source = 'watchPageFetch';
         console.info('[SFC transcript] watchPageFetch tracks:', tracks.length);
       }
+      // 3) Innertube player 엔드포인트 — 요청 시점 기준으로 새로 서명된 baseUrl을 준다
+      if (!tracks.length) {
+        tracks = await fetchTracksViaInnertube(videoId);
+        source = 'innertube';
+        console.info('[SFC transcript] innertube tracks:', tracks.length);
+      }
 
       const track = pickTranscriptTrack(tracks);
       if (!track || !track.baseUrl) return { text: null, reason: 'no_tracks' };
-      // ei/expire가 매 요청 발급 시각마다 바뀌므로, 같은 baseUrl이 반복 등장하면(=값이 안 바뀌면)
-      // 캐시되거나 정체된 값을 계속 쓰고 있다는 신호다.
       console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
 
-      const text = await fetchOneTrackUrl(track.baseUrl);
+      let text = await fetchOneTrackUrl(track.baseUrl);
+
+      // 트랙은 찾았는데 다운로드가 비어 있으면 서명이 이미 만료됐을 가능성이 있다 —
+      // Innertube에서 방금 새로 발급받은 baseUrl로 한 번만 더 시도한다.
+      if (!text && source !== 'innertube') {
+        const freshTracks = await fetchTracksViaInnertube(videoId);
+        const freshTrack = pickTranscriptTrack(freshTracks);
+        if (freshTrack?.baseUrl) {
+          console.info('[SFC transcript] retrying download with fresh innertube baseUrl');
+          text = await fetchOneTrackUrl(freshTrack.baseUrl);
+        }
+      }
+
       return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };
     } catch (err) {
       console.error('[SFC transcript] unexpected error', videoId, err);

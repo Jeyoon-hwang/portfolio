@@ -41,19 +41,26 @@ chrome.storage.local (API 키 + videoId별 결과 캐싱, TTL 7일)
 ```
 
 API 키가 든 요청은 격리된 컨텍스트인 service worker(background.js)에서만 보낸다. 예외로 자막(timedtext) 관련
-작업은 API 키가 필요 없는데도 content.js/background.js 양쪽에 걸쳐 있다:
+작업은 API 키가 필요 없는데도 content.js/background.js 양쪽에 걸쳐 있고, 자막 트랙(baseUrl)을 얻는
+방법은 3단계 폴백 체인으로 되어 있다 (실측 결과 하나로는 부족했다):
 
-- 자막 트랙(baseUrl) 자체는 `chrome.scripting.executeScript(..., world: 'MAIN')`으로 유튜브 페이지의
-  메인 JS 월드에 접근해 `window.ytInitialPlayerResponse`(또는 플레이어 객체)를 그대로 읽어온다.
-  이 방법이 가장 신뢰도가 높다 — 브라우저가 실제로 그 영상을 재생하며 player.js가 계산한 서명/토큰이
-  이미 완전한 상태로 baseUrl에 들어있기 때문이다. `"scripting"` 권한이 이래서 필요하다.
-  content script(격리된 세계)는 페이지의 전역 변수에 직접 접근할 수 없어, 이 부분만 background.js가
-  대신 페이지 메인 월드에 스크립트를 주입해 값을 받아온다.
-- 그렇게 얻은 baseUrl로 실제 자막 텍스트를 받는 fetch 자체는 content.js에서 한다 — service worker는
-  `chrome-extension://`라는 별도 출처라 쿠키/세션이 안 실리는 반면, content script는 유튜브 페이지
-  자체(same-origin)에서 실행되므로 실제 브라우저 세션이 자연스럽게 실린다.
-- baseUrl의 쿼리 파라미터는 절대 건드리지 않는다 — 서명이 파라미터 전체에 걸려 계산되므로, `fmt` 하나만
-  지워도 서명 검증에 걸려 200 OK + 빈 본문으로 돌아온다.
+1. `chrome.scripting.executeScript(..., world: 'MAIN')`으로 유튜브 페이지의 메인 JS 월드에 접근해
+   `window.ytInitialPlayerResponse`(또는 `#movie_player`/쇼츠 플레이어 컨테이너의 `getPlayerResponse()`)를
+   그대로 읽는다. content script(격리된 세계)는 페이지의 전역 변수에 직접 접근할 수 없어 background.js가
+   대신 페이지 메인 월드에 스크립트를 주입한다. `"scripting"` 권한이 이래서 필요하다. — 다만 실측 결과
+   쇼츠에서는 이 전역/플레이어 컨테이너 자체를 못 찾는 경우가 있었다(세로 피드 SPA 전환 특성으로 추정).
+2. (1)이 실패하면 watch 페이지를 다시 fetch해 정적 HTML에 박힌 `ytInitialPlayerResponse`를 파싱한다.
+3. 그래도 실패하거나, 트랙은 찾았는데 실제 다운로드가 빈 응답으로 오면(서명이 이미 만료됐을 가능성),
+   유튜브 웹플레이어 자신이 내부적으로 쓰는 Innertube `/youtubei/v1/player` 엔드포인트를 직접 호출해
+   "요청 시점 기준으로" 새로 서명된 baseUrl을 받는다. content script가 youtube.com origin에서
+   실행되므로 same-origin이라 CORS에 걸리지 않는다. 여기 박힌 WEB 클라이언트 API 키는 yt-dlp 등에서도
+   써온 공개된 값이라 언젠가 유튜브가 로테이션/차단하면 이 함수만 갱신하면 된다.
+
+baseUrl로 실제 자막 텍스트를 받는 fetch 자체는 content.js에서 한다 — service worker는
+`chrome-extension://`라는 별도 출처라 쿠키/세션이 안 실리는 반면, content script는 유튜브 페이지
+자체(same-origin)에서 실행되므로 실제 브라우저 세션이 자연스럽게 실린다. baseUrl의 쿼리 파라미터는
+절대 건드리지 않는다 — 서명이 파라미터 전체에 걸려 계산되므로, `fmt` 하나만 지워도 서명 검증에 걸려
+200 OK + 빈 본문으로 돌아온다.
 
 ## 한계 (알고 사용할 것)
 
