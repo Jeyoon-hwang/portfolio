@@ -34,8 +34,13 @@
   }
 
   function getVideoIdFromLocation() {
-    const m = location.pathname.match(/^\/shorts\/([^/?#]+)/);
-    return m ? m[1] : null;
+    const shortsMatch = location.pathname.match(/^\/shorts\/([^/?#]+)/);
+    if (shortsMatch) return shortsMatch[1];
+    // 쇼츠 전용이던 것을 일반(롱폼) 영상의 /watch?v= 페이지에서도 동작하도록 확장한다.
+    if (location.pathname === '/watch') {
+      return new URLSearchParams(location.search).get('v') || null;
+    }
+    return null;
   }
 
   // 확장 프로그램이 재로드/업데이트되면 이미 페이지에 주입된 이전 content script 인스턴스는
@@ -93,7 +98,7 @@
     panelEl.id = PANEL_ID;
     panelEl.innerHTML = `
       <div class="sfc-panel-header">
-        <span class="sfc-panel-title">🔍 쇼츠 팩트체크</span>
+        <span class="sfc-panel-title">🔍 영상 팩트체크</span>
         <div class="sfc-panel-controls">
           <button class="sfc-minimize-btn" type="button" title="최소화">─</button>
           <button class="sfc-close-btn" type="button" title="끄기">✕</button>
@@ -133,7 +138,7 @@
     reopenBtnEl = document.createElement('button');
     reopenBtnEl.id = 'sfc-reopen-btn';
     reopenBtnEl.type = 'button';
-    reopenBtnEl.title = '쇼츠 팩트체크 다시 열기';
+    reopenBtnEl.title = '영상 팩트체크 다시 열기';
     reopenBtnEl.textContent = '🔍';
     reopenBtnEl.addEventListener('click', () => {
       panelState = 'expanded';
@@ -287,12 +292,15 @@
     no_claim: '자막은 확인했지만 뚜렷한 주장 없음(가사/잡담 등)',
   };
 
-  function renderFactcheckSection(factchecks, videoClaim, transcriptReason) {
+  function renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource) {
     const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
       ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
       : '';
+    // 자막 다운로드가 막혀 제목/설명으로 대체 추정한 경우, 정확도가 자막보다 낮을 수 있다는
+    // 걸 눈에 보이게 표시한다 — 자막에서 나온 것처럼 보이면 안 되기 때문.
+    const sourceNote = claimSource === 'meta' ? ' <span class="sfc-video-claim-source">(자막 다운로드 실패로 제목/설명 기반 추정)</span>' : '';
     const videoClaimHtml = videoClaim
-      ? `<div class="sfc-video-claim"><strong>영상 주장</strong> ${escapeHtml(videoClaim)}</div>`
+      ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
       : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다${escapeHtml(reasonSuffix)}. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>`;
 
     if (!factchecks || !factchecks.length) {
@@ -343,6 +351,7 @@
               <div class="sfc-original-meta">
                 ${item.uploadDate ? `<span class="sfc-original-date">${escapeHtml(new Date(item.uploadDate).toLocaleDateString('ko-KR'))}</span>` : ''}
                 ${item.isOriginalGuess ? '<span class="sfc-original-badge">원본 추정</span>' : ''}
+                ${item.matchCount > 1 ? `<span class="sfc-original-match" title="캡처한 프레임 중 ${item.matchCount}개에서 이 페이지가 검색됨">🎯${item.matchCount}프레임 일치</span>` : ''}
               </div>
             </div>
           </div>
@@ -354,6 +363,11 @@
   // ---------- 원본 찾기 (버튼 트리거 전용) ----------
 
   function getActiveVideoEl() {
+    // 일반 영상(watch) 페이지에는 사이드바 추천 영상 미리보기용 <video>가 추가로 떠 있을 수 있어,
+    // "화면에 보이는 아무 video"가 아니라 실제 플레이어 컨테이너를 먼저 찾는다.
+    const primary = document.querySelector('#movie_player video, .html5-video-player video');
+    if (primary) return primary;
+
     const videos = Array.from(document.querySelectorAll('video'));
     if (!videos.length) return null;
     const visible = videos.find((v) => {
@@ -380,13 +394,29 @@
     });
   }
 
-  // 현재 시점 + 앞뒤로 살짝 떨어진 지점, 총 최대 3장. 1장만 캡처하면 흐린 프레임에 검색이 통째로 실패할 수 있다.
+  // 영상 전체에 고르게 펼쳐 최대 5장을 캡처한다. 한 시점 근처만 찍으면 그 장면이 자막/전환/
+  // 블러로 흐릴 때 검색이 통째로 실패할 수 있고, 여러 프레임을 찍어둬야 배경지에서
+  // 우연히 매칭된 무관한 후보와 실제로 여러 장면에서 반복 매칭되는 진짜 후보를
+  // 투표(matchCount)로 구분할 수 있다.
+  const FRAME_COUNT = 5;
+
   async function captureFrames(video) {
-    const duration = Number.isFinite(video.duration) ? video.duration : Infinity;
+    const duration = Number.isFinite(video.duration) ? video.duration : 0;
     const originalTime = video.currentTime;
     const wasPaused = video.paused;
 
-    const targets = [...new Set([0, -1, 1].map((off) => originalTime + off).filter((t) => t >= 0 && t <= duration))];
+    let targets;
+    if (duration > 2) {
+      // 맨 처음/끝은 암전이나 인트로·아웃트로가 많아 10%~90% 구간에서만 고르게 뽑는다.
+      const usableStart = duration * 0.1;
+      const usableEnd = duration * 0.9;
+      const span = usableEnd - usableStart;
+      targets = Array.from({ length: FRAME_COUNT }, (_, i) => usableStart + (span * i) / (FRAME_COUNT - 1));
+    } else {
+      // 길이를 알 수 없거나 너무 짧은 영상은 현재 재생 지점 기준 앞뒤로 대체한다.
+      targets = [0, -1, 1].map((off) => originalTime + off).filter((t) => t >= 0);
+    }
+    targets = [...new Set(targets.map((t) => Math.max(0, duration ? Math.min(t, duration) : t)))];
 
     const canvas = document.createElement('canvas');
     canvas.width = video.videoWidth || 640;
@@ -448,6 +478,157 @@
     }
   }
 
+  // ---------- 자막(transcript) 가져오기 ----------
+  // background.js(서비스 워커)에서 fetch하면 chrome-extension:// 출처의 완전히 별도 컨텍스트라
+  // credentials:'include'를 줘도 유튜브가 실제 브라우저 세션으로 인식하지 못해 다운로드가
+  // 계속 빈 응답으로 오는 문제가 있었다. content script는 유튜브 페이지 자체(같은 origin)에서
+  // 실행되므로 이 fetch들은 일반 페이지의 same-origin 요청과 동일하게 쿠키/세션이 자연스럽게
+  // 실린다 — 그래서 이 부분만 content.js로 옮겼다. Gemini 호출(API 키 필요)은 여전히
+  // background.js에서 한다.
+
+  function decodeHtmlEntities(str) {
+    return str
+      .replace(/&amp;/g, '&')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, "'")
+      .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
+  }
+
+  function parseTranscriptText(xml) {
+    const textRe = /<text\b[^>]*>([\s\S]*?)<\/text>/g;
+    const parts = [];
+    let m;
+    while ((m = textRe.exec(xml))) {
+      parts.push(decodeHtmlEntities(m[1]));
+    }
+    return parts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function pickTranscriptTrack(tracks) {
+    if (!tracks.length) return null;
+    const manual = tracks.filter((t) => !t.kind);
+    const asr = tracks.filter((t) => t.kind === 'asr');
+    return manual.find((t) => t.langCode === 'ko') || manual[0] || asr.find((t) => t.langCode === 'ko') || asr[0] || tracks[0];
+  }
+
+  // JSON.parse가 실패하지 않도록, 마커 뒤 첫 '{'부터 문자열 안의 중괄호는 무시하고
+  // 실제로 짝이 맞는 지점까지 잘라낸다. 정규식으로 "};"까지 자르면 문자열 값 안에
+  // 세미콜론/중괄호가 있을 때 잘못 잘린다.
+  function extractBalancedJson(html, marker) {
+    const markerIdx = html.indexOf(marker);
+    if (markerIdx === -1) return null;
+    const start = html.indexOf('{', markerIdx);
+    if (start === -1) return null;
+
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < html.length; i++) {
+      const ch = html[i];
+      if (inString) {
+        if (escape) escape = false;
+        else if (ch === '\\') escape = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === '{') depth++;
+      else if (ch === '}') {
+        depth--;
+        if (depth === 0) return html.slice(start, i + 1);
+      }
+    }
+    return null;
+  }
+
+  async function fetchTracksFromWatchPage(videoId) {
+    const res = await fetch(`https://www.youtube.com/watch?v=${videoId}`, {
+      headers: { 'Accept-Language': 'ko-KR,ko;q=0.9,en;q=0.8' },
+    });
+    if (!res.ok) {
+      console.warn('[SFC transcript] watch page fetch failed', videoId, res.status);
+      return [];
+    }
+    const html = await res.text();
+
+    const jsonText = extractBalancedJson(html, 'ytInitialPlayerResponse');
+    if (!jsonText) {
+      console.warn('[SFC transcript] ytInitialPlayerResponse marker not found', videoId);
+      return [];
+    }
+
+    let playerResponse;
+    try {
+      playerResponse = JSON.parse(jsonText);
+    } catch (err) {
+      console.warn('[SFC transcript] ytInitialPlayerResponse JSON parse failed', videoId, err);
+      return [];
+    }
+
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    if (!Array.isArray(tracks)) {
+      console.info('[SFC transcript] no captionTracks in playerResponse (video likely has no captions)', videoId);
+      return [];
+    }
+
+    return tracks
+      .filter((t) => t.baseUrl)
+      .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
+  }
+
+  // baseUrl은 페이지의 player.js가 이미 서명/토큰까지 계산해 완성해둔 URL이다.
+  // 쿼리 파라미터를 하나라도 건드리면(순서 변경, 삭제 등) 서명 검증에 걸려 200 OK인데
+  // 본문만 빈 채로 오므로, 절대 수정하지 않고 그대로 fetch한다.
+  async function fetchOneTrackUrl(url) {
+    const res = await fetch(url);
+    if (!res.ok) {
+      console.warn('[SFC transcript] track fetch not ok', url, res.status);
+      return null;
+    }
+    const raw = await res.text();
+    const text = parseTranscriptText(raw);
+    if (!text) {
+      console.warn('[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ')', url);
+    }
+    return text;
+  }
+
+  // background.js를 거쳐 유튜브 페이지의 메인 월드(content script의 격리된 세계가 아니라
+  // 페이지 자신의 JS 컨텍스트)에서 window.ytInitialPlayerResponse(또는 플레이어 객체)를
+  // 직접 읽어온다. 이렇게 얻은 baseUrl은 브라우저가 실제로 그 영상을 재생하며 player.js가
+  // 만들어낸 것이라 서명/토큰이 완전하다 — 우리가 별도로 watch 페이지를 다시 fetch해서
+  // 파싱한 것보다 훨씬 신뢰할 수 있다.
+  async function fetchTracksFromMainWorld() {
+    try {
+      const res = await sendMessage({ type: 'GET_CAPTION_TRACKS' });
+      return Array.isArray(res?.tracks) ? res.tracks : [];
+    } catch {
+      return [];
+    }
+  }
+
+  // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
+  // 'no_tracks' | 'empty_track' | 'error' | 'ok'
+  async function fetchTranscript(videoId) {
+    try {
+      // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기 (가장 신뢰도 높음 — 서명/토큰이 완전하다)
+      let tracks = await fetchTracksFromMainWorld();
+      // 2) watch 페이지를 다시 fetch해 정적 HTML에서 파싱 (SPA 전환 직후라 아직 갱신 안 된 경우 등의 폴백)
+      if (!tracks.length) tracks = await fetchTracksFromWatchPage(videoId);
+
+      const track = pickTranscriptTrack(tracks);
+      if (!track || !track.baseUrl) return { text: null, reason: 'no_tracks' };
+
+      const text = await fetchOneTrackUrl(track.baseUrl);
+      return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };
+    } catch (err) {
+      console.error('[SFC transcript] unexpected error', videoId, err);
+      return { text: null, reason: 'error' };
+    }
+  }
+
   // ---------- 분석 파이프라인 ----------
 
   async function runAnalysis(videoId, token) {
@@ -466,7 +647,7 @@
     if (token !== runToken) return;
     if (cached && cached.percentages) {
       renderCommentsSection(cached.percentages, cached.representative || null);
-      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null);
+      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null, cached.claimSource || null);
       currentSourceComments = cached.sourceComments || [];
       if (cached.originalSearch) renderOriginalResult(cached.originalSearch);
       return;
@@ -474,8 +655,16 @@
 
     // 댓글 수집과 영상 자막 처리는 서로 독립적이라 동시에 쏜다. 팩트체크 단계에
     // 도달할 때쯤(댓글 수집 + 분류가 끝난 뒤)이면 이 가벼운 호출은 이미 끝나 있을 것이다.
+    // 자막은 이 페이지(content script) 자체에서 가져오고, Gemini 추출만 background에 맡긴다.
     const commentsPromise = sendMessage({ type: 'GET_COMMENTS', videoId });
-    const videoClaimPromise = sendMessage({ type: 'GET_VIDEO_CLAIM', videoId }).catch(() => ({ videoClaim: null, transcriptReason: 'error' }));
+    const videoClaimPromise = fetchTranscript(videoId)
+      .catch(() => ({ text: null, reason: 'error' }))
+      .then(({ text, reason }) =>
+        sendMessage({ type: 'GET_VIDEO_CLAIM', videoId, transcript: text, transcriptReason: reason }).catch(() => ({
+          videoClaim: null,
+          transcriptReason: reason,
+        })),
+      );
 
     const commentsRes = await commentsPromise;
     if (token !== runToken) return;
@@ -521,6 +710,7 @@
     if (token !== runToken) return;
     const videoClaim = videoClaimRes.videoClaim || null;
     const transcriptReason = videoClaimRes.transcriptReason || null;
+    const claimSource = videoClaimRes.claimSource || null;
 
     let factchecks = [];
     if (rebuttalComments.length) {
@@ -532,7 +722,7 @@
       }
       factchecks = fcRes.factchecks || [];
     }
-    renderFactcheckSection(factchecks, videoClaim, transcriptReason);
+    renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
 
     await sendMessage({
       type: 'SET_CACHE',
@@ -544,6 +734,7 @@
         factchecks,
         videoClaim,
         transcriptReason,
+        claimSource,
         sourceComments: currentSourceComments,
       },
     });

@@ -23,6 +23,16 @@ const VIDEO_CLAIM_SYSTEM_PROMPT = `너는 유튜브 쇼츠 자막에서 영상�
 없으면: {"has_claim":false}
 마크다운 코드블록이나 백틱 없이 JSON 객체만 출력하라.`;
 
+// 자막을 못 가져왔을 때(유튜브 자동생성 자막 다운로드가 봇 방지 조치에 막히는 경우가 잦다)의
+// 대체 재료. 제목/설명은 자막보다 정보가 적어 부정확할 수 있음을 프롬프트에 명시한다.
+const VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT = `너는 유튜브 쇼츠의 제목과 설명만 보고 영상이 시청자에게 전달하려는 핵심 주장이나 논조를 한두 문장으로 요약하는 도구다.
+자막을 못 가져와 제목/설명만으로 추정하는 것이므로, 실제 영상 내용과는 다를 수 있다는 점을 감안해 확실히 드러나는 내용만 요약하라.
+제목/설명이 단순 홍보 문구, 해시태그 나열, 무의미한 감탄사뿐이라 요약할 만한 주장이 없으면 그렇다고 판단하라.
+출력은 반드시 JSON 객체 하나만 출력하라.
+주장이 있으면: {"has_claim":true,"claim":"영상의 핵심 주장을 한두 문장으로"}
+없으면: {"has_claim":false}
+마크다운 코드블록이나 백틱 없이 JSON 객체만 출력하라.`;
+
 const VERIFY_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 유튜브 쇼츠의 핵심 주장과, 그 영상에 달린 반박 댓글의 주장이 함께 주어질 수 있다
 (영상 자막이 없어 영상 주장이 주어지지 않으면 반박 댓글 주장만 보고 판정하라).
 반박 댓글의 주장이 실제로 맞는지 웹 검색 결과에 근거해 판정하라 — 영상 주장은 맥락 참고용이지, 영상이 맞다고 전제하지 마라.
@@ -69,14 +79,37 @@ export async function extractClaim(commentText, apiKey, context) {
 }
 
 // 자막이 없는 쇼츠(노래/밈 클립 등)가 많으므로 transcript가 null이면 그냥 null을 반환한다.
+// 롱폼 영상까지 지원하면서 자막이 훨씬 길어질 수 있어, 쇼츠 기준(4000자)보다 넉넉히 늘렸다 —
+// Flash-Lite는 컨텍스트가 넓어 비용/속도 영향은 미미하다.
 export async function extractVideoClaim(transcript, apiKey) {
   if (!transcript) return null;
-  const userPrompt = `자막: ${transcript.slice(0, 4000)}`;
+  const userPrompt = `자막: ${transcript.slice(0, 20000)}`;
 
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
       const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_SYSTEM_PROMPT, userPrompt, apiKey);
+      if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
+    } catch {
+      // 재시도
+    }
+  }
+
+  if (parsed && parsed.has_claim && typeof parsed.claim === 'string' && parsed.claim.trim()) {
+    return parsed.claim.trim();
+  }
+  return null;
+}
+
+// 자막 다운로드가 실패했을 때(유튜브 자동생성 자막 봇 방지 조치 등) 제목/설명으로 대체 추정한다.
+export async function extractVideoClaimFromMeta(title, description, apiKey) {
+  if (!title && !description) return null;
+  const userPrompt = `제목: ${(title || '').slice(0, 200)}\n설명: ${(description || '').slice(0, 2000)}`;
+
+  let parsed = null;
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    try {
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT, userPrompt, apiKey);
       if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도

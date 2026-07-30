@@ -22,20 +22,29 @@ export async function reverseSearch(frames, visionApiKey) {
   }
 
   const data = await res.json();
-  const candidateUrls = new Set();
 
+  // 여러 프레임에서 공통으로 잡히는 후보일수록 신뢰도가 높다. 프레임 하나에서만 우연히
+  // 매칭된 무관한 페이지(예: 비슷한 배경의 다른 영상)와, 실제로 여러 장면에서 반복
+  // 매칭되는 진짜 원본 후보를 구분하기 위해 프레임별로 몇 번 등장했는지 투표수를 센다.
+  const matchCounts = new Map();
   for (const result of data.responses || []) {
     const wd = result.webDetection;
     if (!wd) continue;
+    const urlsInThisFrame = new Set();
     for (const page of wd.pagesWithMatchingImages || []) {
-      if (page.url) candidateUrls.add(page.url);
+      if (page.url) urlsInThisFrame.add(page.url);
     }
     for (const img of wd.fullMatchingImages || []) {
-      if (img.url) candidateUrls.add(img.url);
+      if (img.url) urlsInThisFrame.add(img.url);
+    }
+    for (const url of urlsInThisFrame) {
+      matchCounts.set(url, (matchCounts.get(url) || 0) + 1);
     }
   }
 
-  return Array.from(candidateUrls);
+  return Array.from(matchCounts.entries())
+    .map(([url, matchCount]) => ({ url, matchCount }))
+    .sort((a, b) => b.matchCount - a.matchCount);
 }
 
 export function extractYoutubeVideoId(url) {
