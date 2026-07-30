@@ -144,23 +144,56 @@
     }).join(', ');
   }
 
-  function renderCommentsSection(percentages) {
+  // 카테고리별 좋아요 최다 댓글 1개씩을 "대표 댓글"로 뽑는다 — 어떤 게 반박으로 잡혔는지
+  // 퍼센트 숫자만 봐서는 알 수 없다는 문제를 해결하기 위함.
+  function pickRepresentativeComments(classified) {
+    const result = {};
+    for (const key of CATEGORY_ORDER) {
+      const inCategory = classified.filter((c) => c.category === key);
+      if (!inCategory.length) continue;
+      inCategory.sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0));
+      result[key] = inCategory[0];
+    }
+    return result;
+  }
+
+  function renderCommentsSection(percentages, representative) {
     const gradient = buildConicGradient(percentages);
     const legend = CATEGORY_ORDER.map(
       (key) =>
         `<span class="sfc-legend-item"><i style="background:${CATEGORY_COLORS[key]}"></i>${CATEGORY_LABELS[key]} ${percentages[key] || 0}%</span>`,
     ).join('');
+
+    const repHtml = CATEGORY_ORDER.filter((key) => representative && representative[key])
+      .map((key) => {
+        const c = representative[key];
+        return `
+          <div class="sfc-rep-comment">
+            <span class="sfc-rep-tag" style="background:${CATEGORY_COLORS[key]}">${CATEGORY_LABELS[key]}</span>
+            <span class="sfc-rep-text">${escapeHtml((c.textOriginal || '').replace(/\n+/g, ' ').slice(0, 60))}</span>
+            <span class="sfc-rep-likes">👍${c.likeCount || 0}</span>
+          </div>
+        `;
+      })
+      .join('');
+
     setSectionBody(
       'comments',
-      `<div class="sfc-donut" style="background: conic-gradient(${gradient});"></div><div class="sfc-legend">${legend}</div>`,
+      `<div class="sfc-donut" style="background: conic-gradient(${gradient});"></div><div class="sfc-legend">${legend}</div>${
+        repHtml ? `<div class="sfc-rep-list">${repHtml}</div>` : ''
+      }`,
     );
   }
 
   const VERDICT_ICON = { 사실: '✅', 거짓: '❌', 불충분: '⚠️', '부분적 사실': '🔶' };
 
-  function renderFactcheckSection(factchecks) {
+  function renderFactcheckSection(factchecks, videoClaim) {
+    const videoClaimHtml = videoClaim
+      ? `<div class="sfc-video-claim"><strong>영상 주장</strong> ${escapeHtml(videoClaim)}</div>`
+      : '<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>';
+
     if (!factchecks || !factchecks.length) {
-      setSectionBody('factcheck', '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
+      setSectionBody('factcheck', videoClaimHtml + '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
       return;
     }
     const html = factchecks
@@ -170,14 +203,14 @@
           .join(' · ');
         return `
           <div class="sfc-factcheck-item">
-            <div class="sfc-fc-verdict">${VERDICT_ICON[fc.verdict] || '⚠️'} "${escapeHtml(fc.claim)}"</div>
+            <div class="sfc-fc-verdict">${VERDICT_ICON[fc.verdict] || '⚠️'} 반박: "${escapeHtml(fc.claim)}" → ${escapeHtml(fc.verdict)}</div>
             <div class="sfc-fc-reason">${escapeHtml(fc.reason || '')}</div>
             ${sources ? `<div class="sfc-fc-sources">${sources}</div>` : ''}
           </div>
         `;
       })
       .join('');
-    setSectionBody('factcheck', html);
+    setSectionBody('factcheck', videoClaimHtml + html);
   }
 
   function showOriginalMessage(msg) {
@@ -328,8 +361,8 @@
     const cached = await sendMessage({ type: 'GET_CACHE', videoId });
     if (token !== runToken) return;
     if (cached && cached.percentages) {
-      renderCommentsSection(cached.percentages);
-      renderFactcheckSection(cached.factchecks || []);
+      renderCommentsSection(cached.percentages, cached.representative || null);
+      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null);
       currentSourceComments = cached.sourceComments || [];
       if (cached.originalSearch) renderOriginalResult(cached.originalSearch);
       return;
@@ -369,22 +402,25 @@
       setSectionBody('factcheck', '<p class="sfc-note">댓글 분류 실패로 팩트체크를 진행할 수 없습니다.</p>');
       return;
     }
-    renderCommentsSection(classifyRes.percentages);
+    const representative = pickRepresentativeComments(classifyRes.classified);
+    renderCommentsSection(classifyRes.percentages, representative);
 
     const rebuttalComments = classifyRes.classified.filter((c) => c.category === 'rebuttal');
     currentSourceComments = classifyRes.classified.filter((c) => c.category === 'source').map((c) => c.textOriginal);
 
     let factchecks = [];
+    let videoClaim = null;
     if (rebuttalComments.length) {
-      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments });
+      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', videoId, comments: rebuttalComments });
       if (token !== runToken) return;
       if (fcRes.error) {
         setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
         return;
       }
       factchecks = fcRes.factchecks || [];
+      videoClaim = fcRes.videoClaim || null;
     }
-    renderFactcheckSection(factchecks);
+    renderFactcheckSection(factchecks, videoClaim);
 
     await sendMessage({
       type: 'SET_CACHE',
@@ -392,7 +428,9 @@
       data: {
         percentages: classifyRes.percentages,
         distribution: classifyRes.distribution,
+        representative,
         factchecks,
+        videoClaim,
         sourceComments: currentSourceComments,
       },
     });

@@ -2,7 +2,8 @@
 // content script는 격리된 세계이지만 페이지와 컨텍스트를 공유하므로 API 키를 여기서 다루지 않는다.
 import { fetchComments, fetchUploadDate } from './lib/youtube.js';
 import { classifyComments } from './lib/classifier.js';
-import { extractClaim, verifyClaim } from './lib/factcheck.js';
+import { extractClaim, extractVideoClaim, verifyClaim } from './lib/factcheck.js';
+import { fetchTranscript } from './lib/transcript.js';
 import { reverseSearch, extractYoutubeVideoId, extractUrlsFromText } from './lib/reverse-search.js';
 import { getCache, setCache } from './lib/cache.js';
 
@@ -60,7 +61,7 @@ async function handle(message) {
     case 'FACTCHECK_COMMENTS': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
-      return await factcheckComments(message.comments, geminiApiKey);
+      return await factcheckComments(message.videoId, message.comments, geminiApiKey);
     }
 
     case 'FIND_ORIGINAL': {
@@ -81,7 +82,12 @@ async function handle(message) {
 }
 
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).
-async function factcheckComments(comments, geminiApiKey) {
+// 자막이 있으면 영상 자체의 핵심 주장도 함께 뽑아서, "영상은 이렇게 말했는데 반박 댓글은
+// 이렇게 반박했고 실제로는 어느 쪽이 맞다"를 판정할 때 맥락으로 넘긴다.
+async function factcheckComments(videoId, comments, geminiApiKey) {
+  const transcript = await fetchTranscript(videoId).catch(() => null);
+  const videoClaim = transcript ? await extractVideoClaim(transcript, geminiApiKey).catch(() => null) : null;
+
   const topRebuttals = [...comments]
     .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0))
     .slice(0, MAX_FACTCHECK_TARGETS);
@@ -90,11 +96,11 @@ async function factcheckComments(comments, geminiApiKey) {
   for (const comment of topRebuttals) {
     const claim = await extractClaim(comment.textOriginal, geminiApiKey);
     if (!claim) continue; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
-    const verdict = await verifyClaim(claim, geminiApiKey);
+    const verdict = await verifyClaim(claim, geminiApiKey, videoClaim);
     results.push({ comment: comment.textOriginal, claim, ...verdict });
   }
 
-  return { factchecks: results };
+  return { factchecks: results, videoClaim };
 }
 
 // Vision Web Detection은 화면 워터마크(녹화 프로그램 로고 등)처럼 영상 내용과 무관한

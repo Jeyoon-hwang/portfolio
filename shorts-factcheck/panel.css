@@ -115,6 +115,64 @@
   display: inline-block;
 }
 
+#sfc-panel .sfc-rep-list {
+  margin-top: 10px;
+  border-top: 1px solid #f0f0f0;
+  padding-top: 8px;
+}
+
+#sfc-panel .sfc-rep-comment {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 0;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+#sfc-panel .sfc-rep-tag {
+  flex-shrink: 0;
+  color: #fff;
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+#sfc-panel .sfc-rep-text {
+  flex: 1;
+  min-width: 0;
+  color: #333;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#sfc-panel .sfc-rep-likes {
+  flex-shrink: 0;
+  color: #606060;
+  font-size: 11px;
+}
+
+#sfc-panel .sfc-video-claim {
+  background: #f1f6ff;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  line-height: 1.5;
+}
+
+#sfc-panel .sfc-video-claim strong {
+  display: block;
+  font-size: 11px;
+  color: #3ea6ff;
+  margin-bottom: 2px;
+}
+
+#sfc-panel .sfc-video-claim-missing {
+  margin-bottom: 10px;
+}
+
 #sfc-panel .sfc-factcheck-item {
   padding: 8px 0;
   border-top: 1px solid #f0f0f0;
@@ -248,8 +306,18 @@ html[dark] #sfc-panel .sfc-section {
 html[dark] #sfc-panel .sfc-note,
 html[dark] #sfc-panel .sfc-fc-reason,
 html[dark] #sfc-panel .sfc-legend-item,
-html[dark] #sfc-panel .sfc-original-date {
+html[dark] #sfc-panel .sfc-original-date,
+html[dark] #sfc-panel .sfc-rep-text,
+html[dark] #sfc-panel .sfc-rep-likes {
   color: #aaaaaa;
+}
+
+html[dark] #sfc-panel .sfc-rep-list {
+  border-top-color: #3f3f3f;
+}
+
+html[dark] #sfc-panel .sfc-video-claim {
+  background: #1a2733;
 }
 
 html[dark] #sfc-panel .sfc-toggle {
