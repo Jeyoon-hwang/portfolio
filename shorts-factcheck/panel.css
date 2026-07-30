@@ -1,0 +1,255 @@
+#sfc-panel {
+  all: initial;
+  position: fixed;
+  top: 72px;
+  right: 16px;
+  z-index: 2147483000;
+  width: 340px;
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
+  font-family: "Roboto", "Noto Sans KR", Arial, sans-serif;
+  font-size: 13px;
+  color: #0f0f0f;
+  background: #ffffff;
+  border: 1px solid #e5e5e5;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+  display: block;
+  box-sizing: border-box;
+}
+
+#sfc-panel * {
+  box-sizing: border-box;
+  font-family: inherit;
+}
+
+#sfc-panel .sfc-section {
+  border-bottom: 1px solid #ececec;
+  padding: 12px 14px;
+}
+
+#sfc-panel .sfc-section:last-child {
+  border-bottom: none;
+}
+
+#sfc-panel .sfc-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-weight: 600;
+  font-size: 13px;
+  cursor: default;
+}
+
+#sfc-panel .sfc-toggle {
+  all: unset;
+  cursor: pointer;
+  padding: 2px 6px;
+  color: #606060;
+}
+
+#sfc-panel .sfc-section.sfc-collapsed .sfc-section-body {
+  display: none;
+}
+
+#sfc-panel .sfc-section-body {
+  margin-top: 10px;
+}
+
+#sfc-panel .sfc-note {
+  margin: 0;
+  color: #606060;
+  line-height: 1.5;
+}
+
+#sfc-panel .sfc-note a.sfc-open-options {
+  color: #3ea6ff;
+  text-decoration: underline;
+}
+
+#sfc-panel .sfc-skeleton {
+  height: 64px;
+  border-radius: 8px;
+  background: linear-gradient(90deg, #eee 25%, #f6f6f6 37%, #eee 63%);
+  background-size: 400% 100%;
+  animation: sfc-skeleton-loading 1.4s ease infinite;
+}
+
+@keyframes sfc-skeleton-loading {
+  0% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0 50%;
+  }
+}
+
+#sfc-panel .sfc-donut {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  margin: 0 auto 10px;
+  mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 18px));
+  -webkit-mask: radial-gradient(farthest-side, transparent calc(100% - 18px), #000 calc(100% - 18px));
+}
+
+#sfc-panel .sfc-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  justify-content: center;
+}
+
+#sfc-panel .sfc-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: #333;
+}
+
+#sfc-panel .sfc-legend-item i {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+#sfc-panel .sfc-factcheck-item {
+  padding: 8px 0;
+  border-top: 1px solid #f0f0f0;
+}
+
+#sfc-panel .sfc-factcheck-item:first-child {
+  border-top: none;
+  padding-top: 0;
+}
+
+#sfc-panel .sfc-fc-verdict {
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+#sfc-panel .sfc-fc-reason {
+  margin-top: 4px;
+  color: #444;
+  line-height: 1.5;
+}
+
+#sfc-panel .sfc-fc-sources {
+  margin-top: 4px;
+  font-size: 11px;
+}
+
+#sfc-panel .sfc-fc-sources a {
+  color: #3ea6ff;
+  text-decoration: none;
+  margin-right: 6px;
+}
+
+#sfc-panel .sfc-find-original-btn {
+  all: unset;
+  display: block;
+  width: 100%;
+  text-align: center;
+  padding: 9px 0;
+  border-radius: 18px;
+  background: #0f0f0f;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+#sfc-panel .sfc-find-original-btn:hover {
+  background: #272727;
+}
+
+#sfc-panel .sfc-original-result {
+  margin-top: 10px;
+}
+
+#sfc-panel .sfc-original-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0;
+  border-top: 1px solid #f0f0f0;
+  flex-wrap: wrap;
+}
+
+#sfc-panel .sfc-original-item:first-child {
+  border-top: none;
+}
+
+#sfc-panel .sfc-original-item a {
+  color: #3ea6ff;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+#sfc-panel .sfc-original-date {
+  color: #606060;
+  font-size: 12px;
+}
+
+#sfc-panel .sfc-original-badge {
+  background: #e8f5e9;
+  color: #2e7d32;
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+/* 유튜브 다크모드 대응 */
+html[dark] #sfc-panel {
+  background: #212121;
+  border-color: #3f3f3f;
+  color: #f1f1f1;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+}
+
+html[dark] #sfc-panel .sfc-section {
+  border-bottom-color: #3f3f3f;
+}
+
+html[dark] #sfc-panel .sfc-note,
+html[dark] #sfc-panel .sfc-fc-reason,
+html[dark] #sfc-panel .sfc-legend-item,
+html[dark] #sfc-panel .sfc-original-date {
+  color: #aaaaaa;
+}
+
+html[dark] #sfc-panel .sfc-toggle {
+  color: #aaaaaa;
+}
+
+html[dark] #sfc-panel .sfc-skeleton {
+  background: linear-gradient(90deg, #3a3a3a 25%, #2a2a2a 37%, #3a3a3a 63%);
+  background-size: 400% 100%;
+}
+
+html[dark] #sfc-panel .sfc-factcheck-item,
+html[dark] #sfc-panel .sfc-original-item {
+  border-top-color: #3f3f3f;
+}
+
+html[dark] #sfc-panel .sfc-find-original-btn {
+  background: #f1f1f1;
+  color: #0f0f0f;
+}
+
+html[dark] #sfc-panel .sfc-find-original-btn:hover {
+  background: #d0d0d0;
+}
+
+html[dark] #sfc-panel .sfc-original-badge {
+  background: #1b3a1e;
+  color: #81c784;
+}
+
+@media (max-width: 900px) {
+  #sfc-panel {
+    display: none;
+  }
+}
