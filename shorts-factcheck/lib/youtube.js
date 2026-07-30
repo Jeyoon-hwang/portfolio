@@ -74,3 +74,19 @@ export async function fetchUploadDate(videoId, apiKey) {
   const data = await res.json();
   return data.items?.[0]?.snippet?.publishedAt || null;
 }
+
+// 자막 스크래핑이 유튜브의 자동생성 자막 봇 방지 조치에 막혀 실패했을 때, 공식 API로
+// 안정적으로 얻을 수 있는 제목/설명을 영상 핵심 주장 추출의 대체 재료로 쓴다.
+export async function fetchVideoSnippet(videoId, apiKey) {
+  const url = new URL('https://www.googleapis.com/youtube/v3/videos');
+  url.searchParams.set('part', 'snippet');
+  url.searchParams.set('id', videoId);
+  url.searchParams.set('key', apiKey);
+
+  const res = await fetch(url);
+  if (!res.ok) return null;
+  const data = await res.json();
+  const snippet = data.items?.[0]?.snippet;
+  if (!snippet) return null;
+  return { title: snippet.title || '', description: snippet.description || '' };
+}

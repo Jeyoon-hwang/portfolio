@@ -1,8 +1,8 @@
 // service worker: 모든 외부 API 호출을 이 파일(과 lib/*)에서만 담당한다.
 // content script는 격리된 세계이지만 페이지와 컨텍스트를 공유하므로 API 키를 여기서 다루지 않는다.
-import { fetchComments, fetchUploadDate } from './lib/youtube.js';
+import { fetchComments, fetchUploadDate, fetchVideoSnippet } from './lib/youtube.js';
 import { classifyComments } from './lib/classifier.js';
-import { extractClaim, extractVideoClaim, verifyClaim } from './lib/factcheck.js';
+import { extractClaim, extractVideoClaim, extractVideoClaimFromMeta, verifyClaim } from './lib/factcheck.js';
 import { reverseSearch, extractYoutubeVideoId, extractUrlsFromText } from './lib/reverse-search.js';
 import { getCache, setCache } from './lib/cache.js';
 
@@ -53,15 +53,31 @@ async function handle(message) {
 
     // 자막 자체는 content.js가 유튜브 페이지 컨텍스트(같은 origin, 실제 쿠키/세션)에서
     // 미리 가져와 message.transcript로 넘겨준다 — 여기(서비스 워커)는 별도 chrome-extension://
-    // 출처라 그 fetch를 대신 해줄 수 없다(쿠키가 안 실려 다운로드가 계속 빈 응답으로 왔었다).
-    // 여기서는 API 키가 필요한 Gemini 호출(핵심 주장 추출)만 담당한다.
+    // 출처라 그 fetch를 대신 해줄 수 없다. 그런데도 자막 다운로드는 여전히 실패하는 경우가
+    // 많다 — 유튜브가 자동생성(ASR) 자막에 서명 검증을 걸어 signature까지 붙은 정상 URL도
+    // 200 OK + 빈 본문으로 돌려주는 사례가 실측으로 확인됐다(쿠키/출처 문제가 아니라 서버
+    // 쪽 봇 방지 조치로 보임). 이 경우 자막 없는 영상과 동일하게 취급하지 않고, 공식 API로
+    // 안정적으로 얻을 수 있는 제목/설명으로 대체 추정한다 — 정확도는 낮아지지만 완전히
+    // 비어 있는 것보다 낫다.
     case 'GET_VIDEO_CLAIM': {
-      const { geminiApiKey } = await getKeys();
+      const { geminiApiKey, youtubeApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
+
       const transcript = message.transcript || null;
-      if (!transcript) return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks' };
-      const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
-      return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim' };
+      if (transcript) {
+        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
+        return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null };
+      }
+
+      if (youtubeApiKey) {
+        const meta = await fetchVideoSnippet(message.videoId, youtubeApiKey).catch(() => null);
+        if (meta) {
+          const videoClaim = await extractVideoClaimFromMeta(meta.title, meta.description, geminiApiKey).catch(() => null);
+          if (videoClaim) return { videoClaim, transcriptReason: 'ok', claimSource: 'meta' };
+        }
+      }
+
+      return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks' };
     }
 
     case 'CLASSIFY_COMMENTS': {

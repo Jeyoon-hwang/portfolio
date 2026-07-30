@@ -287,12 +287,15 @@
     no_claim: '자막은 확인했지만 뚜렷한 주장 없음(가사/잡담 등)',
   };
 
-  function renderFactcheckSection(factchecks, videoClaim, transcriptReason) {
+  function renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource) {
     const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
       ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
       : '';
+    // 자막 다운로드가 막혀 제목/설명으로 대체 추정한 경우, 정확도가 자막보다 낮을 수 있다는
+    // 걸 눈에 보이게 표시한다 — 자막에서 나온 것처럼 보이면 안 되기 때문.
+    const sourceNote = claimSource === 'meta' ? ' <span class="sfc-video-claim-source">(자막 다운로드 실패로 제목/설명 기반 추정)</span>' : '';
     const videoClaimHtml = videoClaim
-      ? `<div class="sfc-video-claim"><strong>영상 주장</strong> ${escapeHtml(videoClaim)}</div>`
+      ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
       : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다${escapeHtml(reasonSuffix)}. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>`;
 
     if (!factchecks || !factchecks.length) {
@@ -662,7 +665,7 @@
     if (token !== runToken) return;
     if (cached && cached.percentages) {
       renderCommentsSection(cached.percentages, cached.representative || null);
-      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null);
+      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null, cached.claimSource || null);
       currentSourceComments = cached.sourceComments || [];
       if (cached.originalSearch) renderOriginalResult(cached.originalSearch);
       return;
@@ -725,6 +728,7 @@
     if (token !== runToken) return;
     const videoClaim = videoClaimRes.videoClaim || null;
     const transcriptReason = videoClaimRes.transcriptReason || null;
+    const claimSource = videoClaimRes.claimSource || null;
 
     let factchecks = [];
     if (rebuttalComments.length) {
@@ -736,7 +740,7 @@
       }
       factchecks = fcRes.factchecks || [];
     }
-    renderFactcheckSection(factchecks, videoClaim, transcriptReason);
+    renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
 
     await sendMessage({
       type: 'SET_CACHE',
@@ -748,6 +752,7 @@
         factchecks,
         videoClaim,
         transcriptReason,
+        claimSource,
         sourceComments: currentSourceComments,
       },
     });
