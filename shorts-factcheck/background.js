@@ -57,9 +57,10 @@ async function handle(message) {
     case 'GET_VIDEO_CLAIM': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
-      const transcript = await fetchTranscript(message.videoId).catch(() => null);
-      const videoClaim = transcript ? await extractVideoClaim(transcript, geminiApiKey).catch(() => null) : null;
-      return { videoClaim };
+      const { text: transcript, reason } = await fetchTranscript(message.videoId).catch(() => ({ text: null, reason: 'error' }));
+      if (!transcript) return { videoClaim: null, transcriptReason: reason };
+      const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
+      return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim' };
     }
 
     case 'CLASSIFY_COMMENTS': {

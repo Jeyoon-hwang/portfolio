@@ -278,10 +278,22 @@
 
   const VERDICT_ICON = { 사실: '✅', 거짓: '❌', 불충분: '⚠️', '부분적 사실': '🔶' };
 
-  function renderFactcheckSection(factchecks, videoClaim) {
+  // fetchTranscript/extractVideoClaim이 실패한 단계를 그대로 화면에 노출한다 —
+  // 개발자 콘솔을 열지 않아도 어느 단계에서 막혔는지 바로 보고할 수 있게 하기 위함.
+  const TRANSCRIPT_REASON_LABEL = {
+    no_tracks: '자막 트랙을 찾지 못함',
+    empty_track: '자막 파일을 찾았지만 내용을 받아오지 못함',
+    error: '자막을 가져오는 중 오류 발생',
+    no_claim: '자막은 확인했지만 뚜렷한 주장 없음(가사/잡담 등)',
+  };
+
+  function renderFactcheckSection(factchecks, videoClaim, transcriptReason) {
+    const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
+      ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
+      : '';
     const videoClaimHtml = videoClaim
       ? `<div class="sfc-video-claim"><strong>영상 주장</strong> ${escapeHtml(videoClaim)}</div>`
-      : '<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>';
+      : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다${escapeHtml(reasonSuffix)}. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>`;
 
     if (!factchecks || !factchecks.length) {
       setSectionBody('factcheck', videoClaimHtml + '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
@@ -454,7 +466,7 @@
     if (token !== runToken) return;
     if (cached && cached.percentages) {
       renderCommentsSection(cached.percentages, cached.representative || null);
-      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null);
+      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null);
       currentSourceComments = cached.sourceComments || [];
       if (cached.originalSearch) renderOriginalResult(cached.originalSearch);
       return;
@@ -463,7 +475,7 @@
     // 댓글 수집과 영상 자막 처리는 서로 독립적이라 동시에 쏜다. 팩트체크 단계에
     // 도달할 때쯤(댓글 수집 + 분류가 끝난 뒤)이면 이 가벼운 호출은 이미 끝나 있을 것이다.
     const commentsPromise = sendMessage({ type: 'GET_COMMENTS', videoId });
-    const videoClaimPromise = sendMessage({ type: 'GET_VIDEO_CLAIM', videoId }).catch(() => ({ videoClaim: null }));
+    const videoClaimPromise = sendMessage({ type: 'GET_VIDEO_CLAIM', videoId }).catch(() => ({ videoClaim: null, transcriptReason: 'error' }));
 
     const commentsRes = await commentsPromise;
     if (token !== runToken) return;
@@ -505,11 +517,13 @@
     const rebuttalComments = classifyRes.classified.filter((c) => c.category === 'rebuttal');
     currentSourceComments = classifyRes.classified.filter((c) => c.category === 'source').map((c) => c.textOriginal);
 
+    const videoClaimRes = await videoClaimPromise;
+    if (token !== runToken) return;
+    const videoClaim = videoClaimRes.videoClaim || null;
+    const transcriptReason = videoClaimRes.transcriptReason || null;
+
     let factchecks = [];
-    let videoClaim = null;
     if (rebuttalComments.length) {
-      const videoClaimRes = await videoClaimPromise;
-      videoClaim = videoClaimRes.videoClaim || null;
       const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim });
       if (token !== runToken) return;
       if (fcRes.error) {
@@ -518,7 +532,7 @@
       }
       factchecks = fcRes.factchecks || [];
     }
-    renderFactcheckSection(factchecks, videoClaim);
+    renderFactcheckSection(factchecks, videoClaim, transcriptReason);
 
     await sendMessage({
       type: 'SET_CACHE',
@@ -529,6 +543,7 @@
         representative,
         factchecks,
         videoClaim,
+        transcriptReason,
         sourceComments: currentSourceComments,
       },
     });
