@@ -412,31 +412,69 @@ async function factcheckComments(comments, geminiApiKey, videoClaim, transcriptS
 
 // Vision Web Detection은 화면 워터마크(녹화 프로그램 로고 등)처럼 영상 내용과 무관한
 // 시각 요소로도 매칭되어 스크린샷/튜토리얼 사이트 같은 완전히 무관한 후보를 던질 수 있다.
-// "원본 영상"을 찾는 게 목적이므로 실제 영상 플랫폼 도메인만 후보로 남긴다.
+// 그래서 걸러내긴 해야 하는데, 예전처럼 "아는 플랫폼만 통과"시키는 허용목록 방식은 인터넷에
+// 존재하는 영상 사이트를 다 나열할 수 없어서 원본을 놓치는 쪽이 더 문제였다. 그래서 지금은
+// 3단 판정으로 바꿨다:
+//   1. 확실한 쓰레기(스톡 이미지, 이미지 CDN, 쇼핑몰 등)는 차단목록으로 제거
+//   2. 이미지 파일 URL(.jpg 등)은 "볼 수 있는 영상 페이지"가 아니므로 제거
+//   3. 나머지는 아는 플랫폼이든 처음 보는 사이트든, URL이 영상 페이지처럼 생겼으면 통과
 const VIDEO_HOSTS = [
-  'youtube.com',
-  'youtu.be',
-  'tiktok.com',
-  'instagram.com',
-  'facebook.com',
-  'fb.watch',
-  'twitter.com',
-  'x.com',
-  'vimeo.com',
-  'dailymotion.com',
-  'twitch.tv',
-  'kakao.com',
-  'naver.com',
-  'bilibili.com',
-  'reddit.com',
+  // 글로벌
+  'youtube.com', 'youtu.be', 'tiktok.com', 'instagram.com', 'facebook.com', 'fb.watch',
+  'twitter.com', 'x.com', 'vimeo.com', 'dailymotion.com', 'twitch.tv', 'reddit.com',
+  'rumble.com', 'odysee.com', 'bitchute.com', 'streamable.com', 'imgur.com', 'gfycat.com',
+  '9gag.com', 'snapchat.com', 'threads.net', 'threads.com', 'bsky.app', 'linkedin.com',
+  'tumblr.com', 't.me', 'telegram.me',
+  // 한국
+  'naver.com', 'kakao.com', 'afreecatv.com', 'sooplive.co.kr', 'tving.com', 'wavve.com',
+  'dcinside.com', 'fmkorea.com', 'theqoo.net', 'instiz.net', 'ruliweb.com', 'clien.net',
+  'ppomppu.co.kr', 'bobaedream.co.kr', 'inven.co.kr', 'arca.live', 'todayhumor.co.kr',
+  'humoruniv.com', 'band.us', 'line.me',
+  // 중화권
+  'bilibili.com', 'douyin.com', 'kuaishou.com', 'weibo.com', 'xiaohongshu.com',
+  'ixigua.com', 'iqiyi.com', 'youku.com', 'qq.com',
+  // 일본
+  'nicovideo.jp', 'twitcasting.tv',
+  // 러시아권
+  'vk.com', 'ok.ru', 'rutube.ru',
 ];
 
-function isVideoPlatformUrl(url) {
+// 원본 영상이 있을 리 없는 곳. 특히 이미지 CDN은 Vision이 fullMatchingImages로 자주 던지는데,
+// 링크를 눌러도 이미지 파일 하나만 열려서 "원본 영상"으로는 아무 쓸모가 없다.
+const NON_ORIGINAL_HOSTS = [
+  'shutterstock.com', 'gettyimages.com', 'istockphoto.com', 'alamy.com', 'depositphotos.com',
+  'dreamstime.com', '123rf.com', 'freepik.com', 'pexels.com', 'pixabay.com', 'unsplash.com',
+  'stock.adobe.com', 'pinterest.com', 'pinimg.com', 'wallpaperaccess.com', 'wallhaven.cc',
+  'amazon.com', 'ebay.com', 'aliexpress.com', 'coupang.com', 'taobao.com',
+  'ytimg.com', 'ggpht.com', 'fbcdn.net', 'cdninstagram.com', 'lookaside.fbsbx.com',
+  'twimg.com', 'redd.it', 'licdn.com', 'sstatic.net', 'w3.org',
+];
+
+const IMAGE_FILE_RE = /\.(jpe?g|png|gif|webp|bmp|svg|avif|ico)(\?|#|$)/i;
+
+// 영상 페이지가 흔히 쓰는 경로 모양. 처음 보는 사이트라도 이렇게 생겼으면 후보로 받아준다
+// (예: /watch?v=, /video/123, /reel/abc, /@user/video/123, /p/shortcode).
+const VIDEO_PATH_RE = /(^|\/)(watch|videos?|v|embed|reels?|shorts?|clips?|stor(y|ies)|status|posts?|p|media|movie|player|live|vod)(\/|$)/i;
+
+function hostMatches(host, list) {
+  return list.some((p) => host === p || host.endsWith('.' + p));
+}
+
+// keep: 후보로 쓸지 여부, known: 알려진 영상 플랫폼인지(동점일 때 순위 우대에 쓴다)
+function classifyCandidateUrl(url) {
   try {
-    const host = new URL(url).hostname.replace(/^www\./, '');
-    return VIDEO_HOSTS.some((p) => host === p || host.endsWith('.' + p));
+    const u = new URL(url);
+    const host = u.hostname.replace(/^www\./, '');
+    if (hostMatches(host, NON_ORIGINAL_HOSTS)) return { keep: false, known: false };
+    if (IMAGE_FILE_RE.test(u.pathname)) return { keep: false, known: false };
+
+    const known = hostMatches(host, VIDEO_HOSTS);
+    if (known) return { keep: true, known: true };
+    // 모르는 사이트는 URL이 영상 페이지처럼 생겼을 때만 받아준다 — 루트 페이지나
+    // 기사 목록 같은 건 원본 링크로 제시해봐야 쓸모가 없다.
+    return { keep: VIDEO_PATH_RE.test(u.pathname) || u.searchParams.has('v'), known: false };
   } catch {
-    return false;
+    return { keep: false, known: false };
   }
 }
 
@@ -446,7 +484,9 @@ async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey)
   if (visionApiKey && frames && frames.length) {
     try {
       const results = await reverseSearch(frames, visionApiKey);
-      candidates = results.filter((r) => isVideoPlatformUrl(r.url));
+      candidates = results
+        .map((r) => ({ ...r, ...classifyCandidateUrl(r.url) }))
+        .filter((r) => r.keep);
     } catch {
       // Vision 검색 실패 시 아래 댓글 URL 폴백으로 진행
     }
@@ -460,17 +500,21 @@ async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey)
     for (const text of sourceComments) {
       fallbackUrls.push(...extractUrlsFromText(text));
     }
+    // 댓글에 사람이 직접 적어준 링크는 의도가 분명하므로 URL 모양으로 걸러내지 않는다.
+    // known만 표시해 정렬에 반영한다.
     items = await buildResultItems(
-      [...new Set(fallbackUrls)].map((url) => ({ url, matchCount: 0 })),
+      [...new Set(fallbackUrls)].map((url) => ({ url, matchCount: 0, known: classifyCandidateUrl(url).known })),
       youtubeApiKey,
     );
     items.forEach((item) => (item.fromComment = true));
   }
 
   // 여러 프레임에서 공통으로 검색된 후보(matchCount 높음)일수록 우연한 매칭이 아닐
-  // 가능성이 높으므로 먼저 정렬하고, 그 안에서는 업로드일이 이른 순으로 정렬한다.
+  // 가능성이 높으므로 먼저 정렬한다. 그다음은 아는 영상 플랫폼을 우대하고(처음 보는
+  // 사이트는 URL 모양만 보고 통과시킨 거라 확신도가 낮다), 마지막으로 업로드일이 이른 순.
   items.sort((a, b) => {
     if ((b.matchCount || 0) !== (a.matchCount || 0)) return (b.matchCount || 0) - (a.matchCount || 0);
+    if (!!b.known !== !!a.known) return b.known ? 1 : -1;
     if (a.uploadDate && b.uploadDate) return new Date(a.uploadDate) - new Date(b.uploadDate);
     if (a.uploadDate) return -1;
     if (b.uploadDate) return 1;
@@ -484,7 +528,7 @@ async function findOriginal(frames, sourceComments, visionApiKey, youtubeApiKey)
 
 async function buildResultItems(candidates, youtubeApiKey) {
   const items = [];
-  for (const { url, matchCount } of candidates) {
+  for (const { url, matchCount, known } of candidates) {
     const videoId = extractYoutubeVideoId(url);
     let uploadDate = null;
     if (videoId && youtubeApiKey) {
@@ -492,7 +536,15 @@ async function buildResultItems(candidates, youtubeApiKey) {
     }
     // 유튜브 영상이면 API 호출 없이 공개 썸네일 URL을 바로 쓸 수 있다.
     const thumbnail = videoId ? `https://i.ytimg.com/vi/${videoId}/mqdefault.jpg` : null;
-    items.push({ url, domain: safeHostname(url), videoId, uploadDate, thumbnail, matchCount: matchCount || 0 });
+    items.push({
+      url,
+      domain: safeHostname(url),
+      videoId,
+      uploadDate,
+      thumbnail,
+      matchCount: matchCount || 0,
+      known: !!known,
+    });
   }
   return items;
 }

@@ -42,8 +42,8 @@
   // 페이지 정적 데이터(ytInitialPlayerResponse 등)에는 없지만, **페이지 자신이 보내는
   // 요청에는 들어있다.** 두 군데서 확보한다:
   //
-  //   1. `/youtubei/v1/player` 요청 본문의 serviceIntegrityDimensions.poToken
-  //      — videoId에 바인딩된 값이고, 자막(subs)용 pot도 player와 동일한 바인딩을 쓴다.
+  //   1. Innertube(`/youtubei/...`) 요청 본문에 실려 나가는 poToken — videoId에 바인딩된
+  //      값이고, 자막(subs)용 pot도 player와 동일한 바인딩을 쓴다.
   //        (yt-dlp가 자막 지원을 넣을 때 SUBS를 PLAYER와 같은 VIDEO_ID 바인딩으로 처리했다)
   //   2. 이미 pot이 박혀 나가는 URL(page가 쏜 timedtext 등)에서 그대로 뽑기
   //
@@ -96,20 +96,43 @@
     }
   }
 
-  // /youtubei/v1/player 요청 본문에서 poToken을 뽑는다. 본문은 JSON이고
-  // { videoId, context: { ... }, serviceIntegrityDimensions: { poToken } } 형태다.
-  function harvestPotFromPlayerBody(bodyText) {
+  // 중첩된 JSON 어디에 있든 해당 키의 문자열 값을 찾아낸다(깊이 제한으로 폭주 방지).
+  function findStringValue(obj, key, depth) {
+    if (!obj || typeof obj !== 'object' || depth > 6) return null;
+    const direct = obj[key];
+    if (typeof direct === 'string' && direct) return direct;
+    for (const k of Object.keys(obj)) {
+      const v = obj[k];
+      if (v && typeof v === 'object') {
+        const found = findStringValue(v, key, depth + 1);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Innertube 요청 본문에서 poToken을 뽑는다.
+  //
+  // 처음엔 `/youtubei/v1/player` 본문의 `serviceIntegrityDimensions.poToken`만 고정 경로로
+  // 읽었는데, 실측 결과 **쇼츠에서는 pot이 단 한 번도 안 잡혔다**(`pot token: NOT available`).
+  // 쇼츠는 롱폼과 달리 `/youtubei/v1/player`가 아니라 `/youtubei/v1/reel/reel_item_watch`
+  // 같은 다른 엔드포인트로 플레이어 데이터를 받아오기 때문이다. 그래서 경로를 `/youtubei/`
+  // 전체로 넓히고, 본문 구조도 고정 경로 대신 재귀 탐색으로 바꿨다 — 엔드포인트마다 poToken과
+  // videoId가 박히는 위치가 달라서다.
+  function harvestPotFromBody(bodyText) {
+    // 대부분의 Innertube 요청엔 poToken이 없다. JSON 파싱 전에 문자열로 먼저 걸러 비용을 아낀다.
+    if (!bodyText || bodyText.indexOf('poToken') === -1) return;
     try {
       const body = JSON.parse(bodyText);
-      const pot = body?.serviceIntegrityDimensions?.poToken;
-      if (pot) rememberPot(body?.videoId || null, pot);
+      const pot = findStringValue(body, 'poToken', 0);
+      if (pot) rememberPot(findStringValue(body, 'videoId', 0), pot);
     } catch {
       // JSON이 아니거나 형식이 다르면 무시
     }
   }
 
-  function isPlayerRequest(url) {
-    return typeof url === 'string' && url.indexOf('/youtubei/v1/player') !== -1;
+  function isInnertubeRequest(url) {
+    return typeof url === 'string' && url.indexOf('/youtubei/') !== -1;
   }
 
   document.addEventListener('sfc-caption-query', (e) => {
@@ -140,17 +163,17 @@
 
     if (url) {
       harvestPotFromUrl(url);
-      if (isPlayerRequest(url)) {
+      if (isInnertubeRequest(url)) {
         // 본문은 init.body(문자열)이거나 Request 객체 안에 있다. 어느 쪽이든 원본 요청을
         // 건드리지 않도록 복제해서 비동기로 읽는다 — 실패해도 요청 자체엔 영향이 없다.
         try {
           if (init && typeof init.body === 'string') {
-            harvestPotFromPlayerBody(init.body);
+            harvestPotFromBody(init.body);
           } else if (input && typeof input !== 'string' && typeof input.clone === 'function') {
             input
               .clone()
               .text()
-              .then(harvestPotFromPlayerBody)
+              .then(harvestPotFromBody)
               .catch(() => {});
           }
         } catch {
@@ -179,13 +202,13 @@
 
   OriginalXHR.prototype.open = function (method, url, ...rest) {
     this.__sfcTimedtextUrl = typeof url === 'string' && url.indexOf('/api/timedtext') !== -1 ? url : null;
-    this.__sfcIsPlayer = isPlayerRequest(url);
+    this.__sfcIsInnertube = isInnertubeRequest(url);
     if (typeof url === 'string') harvestPotFromUrl(url);
     return originalOpen.call(this, method, url, ...rest);
   };
 
   OriginalXHR.prototype.send = function (...args) {
-    if (this.__sfcIsPlayer && typeof args[0] === 'string') harvestPotFromPlayerBody(args[0]);
+    if (this.__sfcIsInnertube && typeof args[0] === 'string') harvestPotFromBody(args[0]);
     if (this.__sfcTimedtextUrl) {
       const videoId = extractVideoId(this.__sfcTimedtextUrl);
       this.addEventListener('load', () => onCaptured(videoId, this.responseText));
