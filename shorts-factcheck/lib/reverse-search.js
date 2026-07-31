@@ -4,7 +4,11 @@
 export async function reverseSearch(frames, visionApiKey) {
   const requests = frames.map((base64) => ({
     image: { content: base64 },
-    features: [{ type: 'WEB_DETECTION', maxResults: 10 }],
+    // 예전엔 10이었는데, 후보를 "아는 플랫폼만" 남기던 시절엔 그 이상 받아도 어차피 버려졌다.
+    // 지금은 URL 모양으로 판단해 모르는 사이트도 받으므로, 후보를 넓게 받을수록 유튜브 밖
+    // (인스타·틱톡·커뮤니티 등)의 원본을 찾을 확률이 올라간다. Vision 요금은 결과 개수가
+    // 아니라 이미지 장수 기준이라 이걸 늘려도 비용은 그대로다.
+    features: [{ type: 'WEB_DETECTION', maxResults: 25 }],
   }));
 
   const res = await fetch(
