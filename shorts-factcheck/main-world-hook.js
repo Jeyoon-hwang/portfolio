@@ -86,13 +86,25 @@
     }
   }
 
-  function rememberPot(videoId, pot) {
+  // pot은 용도(context)별로 값이 다르다. 자막(subs)용 pot은 **player용과 같은 바인딩**을 쓰므로
+  // Innertube 요청 본문에서 뽑은 poToken이 정답이고, videoplayback URL에 붙어 나가는 pot은
+  // GVS(스트리밍)용이라 자막에 쓰면 맞지 않을 수 있다.
+  //
+  // 실측에서 같은 videoId에 대해 "collected pot" 로그가 2~4번씩 찍혔는데, 이건 값이 바뀔 때만
+  // 찍히는 로그다 — 즉 두 출처의 서로 다른 pot이 번갈아 덮어쓰고 있었다는 뜻이다. GVS pot이
+  // 나중에 도착해 player pot을 밀어내면 자막 요청이 엉뚱한 토큰을 달고 나가 빈 본문을 받는다.
+  // 그래서 본문(player)에서 얻은 pot이 이미 있으면 URL(GVS)에서 얻은 값으로 덮어쓰지 않는다.
+  function rememberPot(videoId, pot, fromPlayerBody) {
     if (!pot) return;
-    latestPot = pot;
+    if (fromPlayerBody || !latestPot) latestPot = pot;
     if (videoId) {
-      const isNew = potByVideoId.get(videoId) !== pot;
-      remember(potByVideoId, videoId, pot);
-      if (isNew) console.info('[SFC transcript][pot] collected pot for', videoId);
+      const prev = potByVideoId.get(videoId);
+      if (prev && prev.fromPlayerBody && !fromPlayerBody) return; // 등급을 낮추지 않는다
+      const isNew = !prev || prev.pot !== pot;
+      remember(potByVideoId, videoId, { pot, fromPlayerBody: !!fromPlayerBody });
+      if (isNew) {
+        console.info('[SFC transcript][pot] collected pot for', videoId, fromPlayerBody ? '(player)' : '(gvs)');
+      }
     }
     try {
       document.dispatchEvent(new CustomEvent('sfc-pot-captured', { detail: { videoId: videoId || null, pot } }));
@@ -119,7 +131,7 @@
       const pot = parsed.searchParams.get('pot');
       if (pot) {
         potFromUrlCount++;
-        rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot);
+        rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot, false);
       }
     } catch {
       // URL 파싱 실패는 무시
@@ -215,7 +227,7 @@
       notePath(url, !!pot);
       if (pot) {
         potFromBodyCount++;
-        rememberPot(findStringValue(body, 'videoId', 0) || currentPageVideoId(), pot);
+        rememberPot(findStringValue(body, 'videoId', 0) || currentPageVideoId(), pot, true);
       }
     } catch {
       notePath(url, false);
@@ -247,7 +259,7 @@
   // 어차피 틀린 pot이면 본문이 비어서 돌아오니 시도해볼 가치는 있다.
   document.addEventListener('sfc-pot-query', (e) => {
     const videoId = e.detail && e.detail.videoId;
-    const exact = videoId ? potByVideoId.get(videoId) || null : null;
+    const exact = (videoId && potByVideoId.get(videoId)?.pot) || null;
     try {
       document.dispatchEvent(
         new CustomEvent('sfc-pot-result', {
