@@ -194,24 +194,31 @@ export async function extractClaim(commentText, apiKey, context) {
 // 자막이 없는 쇼츠(노래/밈 클립 등)가 많으므로 transcript가 null이면 그냥 null을 반환한다.
 // 롱폼 영상까지 지원하면서 자막이 훨씬 길어질 수 있어, 쇼츠 기준(4000자)보다 넉넉히 늘렸다 —
 // Flash-Lite는 컨텍스트가 넓어 비용/속도 영향은 미미하다.
+// { claim, detail }을 돌려준다. detail은 왜 못 뽑았는지 구분하기 위한 값이다 —
+// 예전엔 "모델이 주장 없다고 판단"과 "응답을 못 받거나 파싱 실패"가 똑같이 null로 뭉개져서,
+// 뉴스 영상인데도 주장이 안 잡히는 사례가 나왔을 때 원인을 좁힐 수가 없었다.
+// 'ok' | 'no_claim' | 'unparsed' | 'blocked' | 'empty_transcript'
 export async function extractVideoClaim(transcript, apiKey) {
-  if (!transcript) return null;
+  if (!transcript) return { claim: null, detail: 'empty_transcript' };
   const userPrompt = `자막: ${transcript.slice(0, 20000)}`;
 
   let parsed = null;
+  let blocked = false;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
       const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_SYSTEM_PROMPT, userPrompt, apiKey);
-      if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
+      if (isGeminiBlocked(data)) blocked = true;
+      else parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도
     }
   }
 
   if (parsed && parsed.has_claim && typeof parsed.claim === 'string' && parsed.claim.trim()) {
-    return parsed.claim.trim();
+    return { claim: parsed.claim.trim(), detail: 'ok' };
   }
-  return null;
+  if (parsed) return { claim: null, detail: 'no_claim' };
+  return { claim: null, detail: blocked ? 'blocked' : 'unparsed' };
 }
 
 // 자막 다운로드가 실패했을 때(유튜브 자동생성 자막 봇 방지 조치 등) 제목/설명으로 대체 추정한다.

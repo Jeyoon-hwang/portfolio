@@ -966,31 +966,39 @@
   }
 
   async function fetchTrackWithPot(baseUrl, videoId) {
-    let pot = null;
-    if (requiresPotToken(baseUrl)) {
-      // 이 영상의 pot이 이미 있으면 즉시 응답이 오므로 이 대기는 "아직 안 온 경우"에만 걸린다.
-      // 예전엔 2.5초만 기다리고 남의 pot으로 넘어갔는데, **남의 pot은 100% 실패한다**(videoId
-      // 바인딩). 즉 일찍 포기해서 얻는 게 없으므로, 이 영상 pot이 올 때까지 넉넉히 기다리는 편이
-      // 언제나 낫다. 실측에서도 다른 영상 pot은 이미 있는데 이 영상 것만 늦게 도착하는 경우가
-      // 많았다(유튜브가 그 영상의 player 요청을 아직 안 끝낸 것뿐).
-      const res = await requestPotToken(videoId, POT_WAIT_MS, POT_COLD_START_TIMEOUT_MS);
-      pot = res.pot;
-      console.info(
-        '[SFC transcript][pot] xpe/xpv detected — pot token:',
-        !pot ? 'NOT available' : res.exact ? 'exact match for this video' : 'STALE (다른 영상 pot — 실패 예상)',
-      );
-      if (!pot) logPotDiagnostics();
+    // pot을 요구하지 않는 트랙(사람이 직접 단 수동 자막 등)은 그냥 받으면 된다.
+    if (!requiresPotToken(baseUrl)) {
+      let parsed = await fetchOneTrackUrl(baseUrl, null);
+      if (!parsed.text) {
+        // xpe 판정이 빗나갔을 수도 있으니, 마침 이 영상 pot이 있으면 한 번 더 시도한다.
+        const late = await requestPotToken(videoId, 0);
+        if (late.exact) parsed = await fetchOneTrackUrl(baseUrl, late.pot);
+      }
+      return parsed;
     }
 
-    let parsed = await fetchOneTrackUrl(baseUrl, pot);
-    if (!parsed.text && !pot) {
-      const res = await requestPotToken(videoId, 2500);
-      if (res.pot) {
-        console.info('[SFC transcript][pot] retrying empty response with pot token (exact:', res.exact, ')');
-        parsed = await fetchOneTrackUrl(baseUrl, res.pot);
-      }
+    // 이 영상의 pot이 이미 있으면 즉시 응답이 오므로 이 대기는 "아직 안 온 경우"에만 걸린다.
+    // 실측에서 다른 영상 pot은 이미 있는데 이 영상 것만 늦게 도착하는 경우가 많았다
+    // (유튜브가 그 영상의 player 요청을 아직 안 끝낸 것뿐).
+    const res = await requestPotToken(videoId, POT_WAIT_MS, POT_COLD_START_TIMEOUT_MS);
+
+    // 남의 pot으로 보낸 요청은 실측 3회 모두 200 OK + 0바이트였고 성공한 적이 한 번도 없다
+    // (pot은 videoId 바인딩이라 당연한 결과다). 어차피 실패가 확정된 요청을 굳이 보내면
+    // 왕복 시간만 버리고 "pot: yes인데 본문이 비었다"는 헷갈리는 로그만 남으므로,
+    // 이 영상 pot이 없으면 바로 다음 단계(캡처)로 넘긴다.
+    if (!res.exact) {
+      console.info(
+        '[SFC transcript][pot] xpe/xpv detected — 이 영상 pot 없음' +
+          (res.pot ? '(다른 영상 pot만 보유)' : '') +
+          ' → 실패 확정 요청은 건너뛰고 캡처 단계로',
+      );
+      logPotDiagnostics();
+      return { text: '', segments: [] };
     }
-    if (parsed.text && pot) console.info('[SFC transcript][pot] caption download succeeded WITH pot token');
+
+    console.info('[SFC transcript][pot] xpe/xpv detected — pot token: exact match for this video');
+    const parsed = await fetchOneTrackUrl(baseUrl, res.pot);
+    if (parsed.text) console.info('[SFC transcript][pot] caption download succeeded WITH pot token');
     return parsed;
   }
 

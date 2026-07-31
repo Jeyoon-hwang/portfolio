@@ -276,15 +276,19 @@ async function handle(message, sender) {
       const transcript = message.transcript || null;
       if (transcript) {
         let claimErr = null;
-        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch((err) => {
+        const res = await extractVideoClaim(transcript, geminiApiKey).catch((err) => {
           claimErr = err?.message || String(err);
-          return null;
+          return { claim: null, detail: 'error' };
         });
+        const videoClaim = res.claim;
+        // "모델이 주장 없다고 판단"과 "응답을 못 받거나 파싱 실패"를 구분해서 남긴다 —
+        // 뉴스 영상인데도 주장이 안 잡히는 사례가 나왔을 때 프롬프트 문제인지 호출 문제인지
+        // 이 값으로 바로 갈린다. 자막 길이도 같이 남긴다(너무 짧으면 그게 원인일 수 있다).
         const bgLog = videoClaim
-          ? 'caption claim extracted ok'
+          ? `caption claim extracted ok (자막 ${transcript.length}자)`
           : claimErr
             ? `extractVideoClaim (caption) failed: ${claimErr}`
-            : 'extractVideoClaim (caption) returned no claim';
+            : `extractVideoClaim (caption) 실패 — 원인: ${res.detail} (자막 ${transcript.length}자, 앞부분: "${transcript.slice(0, 80)}")`;
         console.info('[SFC transcript]', bgLog);
         return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null, bgLog };
       }

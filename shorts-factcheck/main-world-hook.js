@@ -100,9 +100,11 @@
     if (videoId) {
       const prev = potByVideoId.get(videoId);
       if (prev && prev.fromPlayerBody && !fromPlayerBody) return; // 등급을 낮추지 않는다
-      const isNew = !prev || prev.pot !== pot;
+      // GVS pot은 요청마다 값이 바뀌어서, 값 변경마다 찍으면 콘솔이 도배된다.
+      // 그 영상 pot을 처음 확보했을 때와 등급이 올라갔을 때(gvs → player)만 알린다.
+      const notable = !prev || (fromPlayerBody && !prev.fromPlayerBody);
       remember(potByVideoId, videoId, { pot, fromPlayerBody: !!fromPlayerBody });
-      if (isNew) {
+      if (notable) {
         console.info('[SFC transcript][pot] collected pot for', videoId, fromPlayerBody ? '(player)' : '(gvs)');
       }
     }
@@ -125,14 +127,22 @@
   // 인정받지 못했다. 지금은 주소창의 videoId로 대신 짚는다. 쇼츠가 다음 영상을 미리 로드하는
   // 특성상 옆 영상 pot을 현재 영상 것으로 잘못 붙일 수 있지만, 틀린 pot이면 어차피 본문이
   // 비어서 돌아오고 다음 단계로 넘어갈 뿐이라 안 하는 것보단 낫다.
+  //
+  // 단, **지금 보고 있는 영상 것만** 저장한다. 피드에서 마우스를 올리면 유튜브가 미리보기를
+  // 재생하는데, 그때마다 그 영상의 GVS pot이 쏟아진다(실측: 한 영상에 20번 넘게). 그대로 두면
+  // 버퍼(MAX_BUFFERED)가 미리보기 pot으로 가득 차서 **정작 우리가 분석 중인 영상의 pot이
+  // 밀려나고**, 콘솔도 도배된다. 미리보기 영상의 GVS pot은 우리한테 쓸모도 없다 — 그 영상으로
+  // 실제로 넘어가면 그때 player 요청이 새로 나가면서 더 정확한 pot을 주기 때문이다.
   function harvestPotFromUrl(url) {
     try {
       const parsed = new URL(url, location.href);
       const pot = parsed.searchParams.get('pot');
-      if (pot) {
-        potFromUrlCount++;
-        rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot, false);
-      }
+      if (!pot) return;
+      potFromUrlCount++;
+      const current = currentPageVideoId();
+      const videoId = parsed.searchParams.get('v') || current;
+      if (!videoId || videoId !== current) return; // 미리보기 등 다른 영상 것은 버린다
+      rememberPot(videoId, pot, false);
     } catch {
       // URL 파싱 실패는 무시
     }
