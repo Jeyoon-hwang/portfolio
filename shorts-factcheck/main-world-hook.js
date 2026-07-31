@@ -21,6 +21,25 @@
     }
   }
 
+  // content.js가 캡션 캡처 이벤트를 듣기 시작하는 시점은 우리가 요청을 실제로 가로챈 시점보다
+  // 한참 늦을 수 있다(1~3단계 URL 기반 시도가 먼저 몇 초 걸린 뒤에야 리스너를 붙인다). 유튜브가
+  // 이 영상의 캡션을 그 전에(예: 재생 시작과 동시에 자체적으로) 이미 요청해버렸다면, dispatchEvent는
+  // 그 순간 듣는 사람이 없어 그대로 유실되고 다시 재현할 방법이 없다 — 실측에서 매번
+  // "no event captured within timeout"으로 실패한 게 바로 이 레이스로 보인다. 그래서 videoId별로
+  // 최근 캡처본을 잠깐 버퍼링해두고, 늦게 붙는 리스너가 "혹시 이미 잡아둔 거 있어?"라고 물어보면
+  // (sfc-caption-query) 즉시 재통지한다.
+  const MAX_BUFFERED = 20;
+  const captured = new Map();
+
+  function remember(videoId, text) {
+    if (!videoId) return;
+    captured.delete(videoId);
+    captured.set(videoId, text);
+    if (captured.size > MAX_BUFFERED) {
+      captured.delete(captured.keys().next().value);
+    }
+  }
+
   function notify(videoId, text) {
     try {
       document.dispatchEvent(new CustomEvent('sfc-caption-captured', { detail: { videoId, text } }));
@@ -28,6 +47,16 @@
       // document가 아직 없는 극초기 타이밍이면 조용히 무시 (이 시점엔 캡션 요청도 있을 수 없다)
     }
   }
+
+  function onCaptured(videoId, text) {
+    remember(videoId, text);
+    notify(videoId, text);
+  }
+
+  document.addEventListener('sfc-caption-query', (e) => {
+    const videoId = e.detail && e.detail.videoId;
+    if (videoId && captured.has(videoId)) notify(videoId, captured.get(videoId));
+  });
 
   const originalFetch = window.fetch;
   window.fetch = function (input, init) {
@@ -38,7 +67,7 @@
         res
           .clone()
           .text()
-          .then((text) => notify(videoId, text))
+          .then((text) => onCaptured(videoId, text))
           .catch(() => {});
         return res;
       });
@@ -58,7 +87,7 @@
   OriginalXHR.prototype.send = function (...args) {
     if (this.__sfcTimedtextUrl) {
       const videoId = extractVideoId(this.__sfcTimedtextUrl);
-      this.addEventListener('load', () => notify(videoId, this.responseText));
+      this.addEventListener('load', () => onCaptured(videoId, this.responseText));
     }
     return originalSend.apply(this, args);
   };

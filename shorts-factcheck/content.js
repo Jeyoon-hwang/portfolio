@@ -682,6 +682,7 @@
   function waitForCapturedCaption(videoId, timeoutMs) {
     return new Promise((resolve) => {
       let settled = false;
+      let timer;
       function onEvent(e) {
         if (settled || !e.detail || e.detail.videoId !== videoId) return;
         settled = true;
@@ -690,12 +691,18 @@
         resolve(e.detail.text || null);
       }
       document.addEventListener('sfc-caption-captured', onEvent);
-      const timer = setTimeout(() => {
+      timer = setTimeout(() => {
         if (settled) return;
         settled = true;
         document.removeEventListener('sfc-caption-captured', onEvent);
         resolve(null);
       }, timeoutMs);
+      // 리스너와 타이머를 다 걸어둔 뒤에야 물어본다 — main-world-hook.js가 이미 버퍼링해둔
+      // 캡처본이 있으면 이 dispatchEvent 호출 안에서 onEvent가 동기적으로 실행되며 즉시
+      // resolve될 수 있는데, 그 시점에 timer가 아직 없으면 clearTimeout(timer)가 깨진다.
+      // 유튜브가 재생 시작과 동시에 캡션을 미리 요청해버려 리스너를 걸기 전에 이미 지나간
+      // 경우를 이렇게 구제한다.
+      document.dispatchEvent(new CustomEvent('sfc-caption-query', { detail: { videoId } }));
     });
   }
 
