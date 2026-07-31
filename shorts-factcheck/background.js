@@ -263,16 +263,50 @@ async function handle(message, sender) {
 
       const transcript = message.transcript || null;
       if (transcript) {
-        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
-        return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null };
+        let claimErr = null;
+        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch((err) => {
+          claimErr = err?.message || String(err);
+          return null;
+        });
+        const bgLog = videoClaim
+          ? 'caption claim extracted ok'
+          : claimErr
+            ? `extractVideoClaim (caption) failed: ${claimErr}`
+            : 'extractVideoClaim (caption) returned no claim';
+        console.info('[SFC transcript]', bgLog);
+        return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null, bgLog };
       }
 
+      // 이 폴백 경로는 여태 실패해도 아무 로그도 안 남아서, 자막도 없고 폴백도 없는 완전
+      // 실패가 실제 오류(키 제한, 쿼터 등) 때문인지 정말 뚜렷한 주장이 없어서인지 구분이
+      // 안 됐다 — 두 실패 지점 모두 이유를 남긴다.
       if (youtubeApiKey) {
-        const meta = await fetchVideoSnippet(message.videoId, youtubeApiKey).catch(() => null);
-        if (meta) {
-          const videoClaim = await extractVideoClaimFromMeta(meta.title, meta.description, geminiApiKey).catch(() => null);
-          if (videoClaim) return { videoClaim, transcriptReason: 'ok', claimSource: 'meta' };
+        let metaErr = null;
+        const meta = await fetchVideoSnippet(message.videoId, youtubeApiKey).catch((err) => {
+          metaErr = err?.message || String(err);
+          return null;
+        });
+        if (metaErr) {
+          const bgLog = `fetchVideoSnippet failed: ${metaErr}`;
+          console.warn('[SFC transcript]', bgLog);
+          return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks', bgLog };
         }
+        if (meta) {
+          let claimErr = null;
+          const videoClaim = await extractVideoClaimFromMeta(meta.title, meta.description, geminiApiKey).catch((err) => {
+            claimErr = err?.message || String(err);
+            return null;
+          });
+          if (videoClaim) return { videoClaim, transcriptReason: 'ok', claimSource: 'meta' };
+          const bgLog = claimErr
+            ? `extractVideoClaimFromMeta failed: ${claimErr}`
+            : `extractVideoClaimFromMeta found no claim in title/description ("${(meta.title || '').slice(0, 60)}")`;
+          console.info('[SFC transcript]', bgLog);
+          return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks', bgLog };
+        }
+        console.warn('[SFC transcript] fetchVideoSnippet returned no meta (no error thrown, but empty)');
+      } else {
+        console.warn('[SFC transcript] no youtubeApiKey, cannot try title/description fallback');
       }
 
       return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks' };

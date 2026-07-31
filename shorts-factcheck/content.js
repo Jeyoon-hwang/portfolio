@@ -858,6 +858,7 @@
     // 나중에 이 영상으로 다시 스크롤해 돌아왔을 때 처음부터(느린 캡처 단계 포함) 다시 하지 않고
     // 캐시에서 바로 보여줄 수 있다.
     const videoClaimRes = await videoClaimPromise;
+    if (videoClaimRes.bgLog) console.info('[SFC transcript][bg]', videoClaimRes.bgLog);
     const videoClaim = videoClaimRes.videoClaim || null;
     const transcriptReason = videoClaimRes.transcriptReason || null;
     const claimSource = videoClaimRes.claimSource || null;
