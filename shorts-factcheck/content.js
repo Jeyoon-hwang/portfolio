@@ -287,6 +287,11 @@
 
   const VERDICT_ICON = { 사실: '✅', 거짓: '❌', 불충분: '⚠️', '부분적 사실': '🔶' };
 
+  // 콜드 로드 직후 BotGuard가 pot을 만들어낼 때까지 기다려주는 시간. 페이지를 처음 열면
+  // 유튜브 자신의 player 요청조차 pot 없이 나가므로(실측 확인) 트리거로는 해결이 안 되고
+  // 기다리는 것 말고 방법이 없다. 세션당 첫 영상에서만 한 번 겪는 비용이다.
+  const POT_COLD_START_TIMEOUT_MS = 10000;
+
   // fetchTranscript/extractVideoClaim이 실패한 단계를 그대로 화면에 노출한다 —
   // 개발자 콘솔을 열지 않아도 어느 단계에서 막혔는지 바로 보고할 수 있게 하기 위함.
   const TRANSCRIPT_REASON_LABEL = {
@@ -782,7 +787,7 @@
   // 영상의 pot을 그대로 붙였더니 pot을 붙였는데도 본문이 0바이트로 왔다). 그래서 이 영상의
   // pot이 확실할 때(exact)만 바로 쓰고, 아직 없으면 타임아웃까지 기다렸다가 그때도 없으면
   // 마지막에나 남의 pot이라도 한 번 시도해본다(어차피 실패해도 다음 단계로 넘어갈 뿐이다).
-  function requestPotToken(videoId, timeoutMs) {
+  function requestPotToken(videoId, timeoutMs, coldStartTimeoutMs) {
     return new Promise((resolve) => {
       let settled = false;
       let timer;
@@ -796,9 +801,18 @@
         resolve({ pot: pot || null, exact: !!exact });
       }
       function onResult(e) {
-        if (!e.detail || !e.detail.pot) return;
-        if (e.detail.exact) finish(e.detail.pot, true);
-        else staleFallback = e.detail.pot; // 아직 확정 못 함 — 계속 기다린다
+        if (!e.detail) return;
+        if (e.detail.pot && e.detail.exact) return finish(e.detail.pot, true);
+        if (e.detail.pot) staleFallback = e.detail.pot; // 아직 확정 못 함 — 계속 기다린다
+        // 콜드 로드 직후엔 BotGuard 챌린지가 아직 안 끝나서 유튜브 자신의 player 요청에도
+        // pot이 안 실려 나간다(실측: /youtubei/v1/player를 6번이나 봤는데 전부 pot 없음).
+        // 트리거를 더 해봐야 소용없고 기다리는 수밖에 없으므로, 이 세션에서 pot을 하나도
+        // 못 본 상태라면 대기 시간을 늘린다. 첫 영상 한 번만 겪는 비용이다.
+        if (!e.detail.everSeenPot && coldStartTimeoutMs > timeoutMs) {
+          console.info('[SFC transcript][pot] BotGuard 준비 전으로 보임 — pot 대기를', coldStartTimeoutMs, 'ms로 연장');
+          clearTimeout(timer);
+          timer = setTimeout(() => finish(staleFallback, false), coldStartTimeoutMs);
+        }
       }
       // 대기 중에 이 영상의 pot이 새로 잡히면 그 즉시 쓴다.
       function onCaptured(e) {
@@ -843,7 +857,9 @@
   async function fetchTrackWithPot(baseUrl, videoId) {
     let pot = null;
     if (requiresPotToken(baseUrl)) {
-      const res = await requestPotToken(videoId, 2500);
+      // 평소엔 2.5초면 충분하다(이미 pot이 있으면 즉시 온다). 콜드 로드처럼 BotGuard가 아직
+      // 아무것도 못 만든 상태로 확인되면 requestPotToken이 알아서 아래 긴 값으로 늘려 기다린다.
+      const res = await requestPotToken(videoId, 2500, POT_COLD_START_TIMEOUT_MS);
       pot = res.pot;
       console.info(
         '[SFC transcript][pot] xpe/xpv detected — pot token:',

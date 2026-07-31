@@ -235,7 +235,14 @@
     try {
       document.dispatchEvent(
         new CustomEvent('sfc-pot-result', {
-          detail: { videoId: videoId || null, pot: exact || latestPot || null, exact: !!exact },
+          detail: {
+            videoId: videoId || null,
+            pot: exact || latestPot || null,
+            exact: !!exact,
+            // BotGuard가 이 세션에서 pot을 단 하나라도 만들어낸 적이 있는지. 아직 하나도
+            // 없다면 챌린지가 진행 중이라는 뜻이라, 기다리면 생길 가능성이 높다.
+            everSeenPot: latestPot !== null,
+          },
         }),
       );
     } catch {
