@@ -77,12 +77,28 @@
       // 이미 다른 영상으로 넘어갔으면 늦게 도착한 결과는 버린다.
       if (!state || msg.videoId !== state.videoId || state.videoId !== currentVideoId) return;
 
-      if (msg.kind === 'video') {
-        state.videoItems.push(msg.item);
-        renderVideoCheckSection(state.videoItems, state.videoClaim, state.transcriptReason, state.claimSource, null, true);
+      const isVideo = msg.kind === 'video';
+      // total은 검증 건수가 확정되는 즉시(첫 결과보다 먼저) 오고, skipped는 주장이 없어
+      // 검증을 건너뛴 건이다. 건너뛴 만큼 빼주지 않으면 "3/5 완료"에서 영영 안 끝난다.
+      if (typeof msg.total === 'number') {
+        if (isVideo) state.videoTotal = msg.total;
+        else state.rebuttalTotal = msg.total;
+      }
+      if (msg.skipped) {
+        if (isVideo) state.videoTotal = Math.max(0, state.videoTotal - 1);
+        else state.rebuttalTotal = Math.max(0, state.rebuttalTotal - 1);
+      }
+      if (msg.item) {
+        if (isVideo) state.videoItems.push(msg.item);
+        else state.rebuttalItems.push(msg.item);
+      }
+
+      if (isVideo) {
+        renderVideoCheckSection(state.videoItems, state.videoClaim, state.transcriptReason, state.claimSource, null, {
+          total: state.videoTotal,
+        });
       } else {
-        state.rebuttalItems.push(msg.item);
-        renderFactcheckSection(state.rebuttalItems, true);
+        renderFactcheckSection(state.rebuttalItems, { total: state.rebuttalTotal });
       }
     });
   }
@@ -348,7 +364,7 @@
 
   // 영상이 스스로 한 말이 맞는지를 보여주는 섹션. 댓글이 뭐라고 하든 무관하게 독립적으로
   // 판정한 결과라, 반박 댓글 섹션과 분리해서 맨 위에 둔다.
-  function renderVideoCheckSection(videoFactchecks, videoClaim, transcriptReason, claimSource, videoCheckReason, pending) {
+  function renderVideoCheckSection(videoFactchecks, videoClaim, transcriptReason, claimSource, videoCheckReason, pendingInfo) {
     const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
       ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
       : '';
@@ -364,14 +380,14 @@
     const hasItems = !!(videoFactchecks && videoFactchecks.length);
     const summaryHtml = videoClaim
       ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
-      : hasItems || pending
+      : hasItems || pendingInfo
         ? ''
         : transcriptReason === 'no_claim'
           ? '<p class="sfc-note sfc-video-claim-missing">자막은 받았지만 사실로 따져볼 주장이 없는 영상입니다 (노래 가사·잡담 등).</p>'
           : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
 
-    if (hasItems || pending) {
-      renderIncremental('videocheck', summaryHtml, videoFactchecks || [], '영상', !!pending);
+    if (hasItems || pendingInfo) {
+      renderIncremental('videocheck', summaryHtml, videoFactchecks || [], '영상', pendingInfo);
       return;
     }
 
@@ -392,7 +408,14 @@
 
   // 판정이 끝나는 대로 하나씩 덧붙인다. 전체를 다시 그리면 이미 떠 있던 항목까지 등장
   // 애니메이션이 다시 돌아 화면이 깜빡이므로, 아직 안 그린 항목만 뒤에 append한다.
-  function renderIncremental(section, headerHtml, items, label, pending) {
+  // "아직 AI가 결과를 다 안 보냈다"를 몇 건 중 몇 건인지까지 보여준다. 건수를 아직 모르는
+  // 아주 초반(검증 대상이 확정되기 전)에는 숫자 없이 표시한다.
+  // 끝의 점 세 개는 CSS(.sfc-pending-note::after)가 애니메이션으로 붙이므로 여기선 넣지 않는다.
+  function pendingLabel(done, total) {
+    return total > 0 ? `${done}/${total} 완료 · AI 응답 전송 중` : 'AI 응답 전송 중';
+  }
+
+  function renderIncremental(section, headerHtml, items, label, pendingInfo) {
     const body = panelEl?.querySelector(`.sfc-section[data-section="${section}"] .sfc-section-body`);
     if (!body) return;
 
@@ -409,21 +432,29 @@
       list.dataset.rendered = String(items.length);
     }
 
-    const note = body.querySelector('.sfc-pending-note');
-    if (pending && !note) {
-      body.insertAdjacentHTML('beforeend', '<p class="sfc-note sfc-pending-note">나머지 항목 검증 중…</p>');
-    } else if (!pending && note) {
+    // 남은 게 없으면(도착 건수가 총 건수에 도달) 표시를 굳이 남겨두지 않는다.
+    const total = pendingInfo?.total || 0;
+    const stillWaiting = !!pendingInfo && (total === 0 || items.length < total);
+    let note = body.querySelector('.sfc-pending-note');
+    if (stillWaiting) {
+      const text = pendingLabel(items.length, total);
+      if (!note) {
+        body.insertAdjacentHTML('beforeend', `<p class="sfc-note sfc-pending-note">${escapeHtml(text)}</p>`);
+      } else {
+        note.textContent = text;
+      }
+    } else if (note) {
       note.remove();
     }
   }
 
-  function renderFactcheckSection(factchecks, pending) {
+  function renderFactcheckSection(factchecks, pendingInfo) {
     const items = factchecks || [];
-    if (!pending && !items.length) {
+    if (!pendingInfo && !items.length) {
       setSectionBody('factcheck', '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
       return;
     }
-    renderIncremental('factcheck', '', items, '반박', !!pending);
+    renderIncremental('factcheck', '', items, '반박', pendingInfo);
   }
 
   function showOriginalMessage(msg) {
@@ -1184,12 +1215,16 @@
       claimSource,
       videoItems: [],
       rebuttalItems: [],
+      videoTotal: 0,
+      rebuttalTotal: 0,
     };
     if (isCurrent()) {
       // 결과가 도착하기 전에도 "검증 중" 상태를 먼저 보여준다 — 빈 스켈레톤만 오래 떠 있는
       // 것보다 영상 주장 요약이라도 먼저 읽을 수 있는 편이 낫다.
-      renderVideoCheckSection([], videoClaim, transcriptReason, claimSource, null, true);
-      if (rebuttalComments.length) renderFactcheckSection([], true);
+      // 건수는 background가 검증 대상을 확정하는 즉시 FACTCHECK_PROGRESS로 알려준다.
+      // 그전까지는 숫자 없이 "전송 중"만 띄운다.
+      renderVideoCheckSection([], videoClaim, transcriptReason, claimSource, null, { total: 0 });
+      if (rebuttalComments.length) renderFactcheckSection([], { total: 0 });
     }
 
     // 영상 주장 검증과 반박 댓글 팩트체크는 서로 독립적이라 동시에 돌린다 — 둘 다 웹서치가
