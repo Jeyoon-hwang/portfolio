@@ -377,26 +377,34 @@ async function handle(message, sender) {
 // 하나씩 흘려보내고, content.js가 도착하는 대로 패널에 덧붙인다.
 function makeProgressReporter(sender, videoId, kind) {
   const tabId = sender?.tab?.id;
-  if (tabId == null || !videoId) return () => {};
-  return (item) => {
-    // 사용자가 이미 다른 영상으로 넘어갔으면 받는 쪽이 videoId를 보고 버린다.
-    chrome.tabs.sendMessage(tabId, { type: 'FACTCHECK_PROGRESS', kind, item, videoId }).catch(() => {});
+  const noop = { start() {}, item() {}, skip() {} };
+  if (tabId == null || !videoId) return noop;
+  // 사용자가 이미 다른 영상으로 넘어갔으면 받는 쪽이 videoId를 보고 버린다.
+  const send = (payload) =>
+    chrome.tabs.sendMessage(tabId, { type: 'FACTCHECK_PROGRESS', kind, videoId, ...payload }).catch(() => {});
+  return {
+    // 검증할 건수가 확정되는 즉시 알린다 — 첫 결과가 오기 전에도 "0/5 완료"를 띄우기 위해서.
+    start: (total) => send({ total }),
+    item: (item, total) => send({ item, total }),
+    // 주장이 없어 검증을 건너뛴 건. 이걸 안 알리면 진행 표시가 5건을 영원히 기다린다.
+    skip: (total) => send({ skipped: true, total }),
   };
 }
 
 // 영상 자막 → 검증 가능한 주장 여러 개 → 각각 웹서치 판정. 판정 호출이 가장 느리므로
 // 댓글 쪽과 마찬가지로 병렬로 돌려 "가장 느린 1건"의 시간만 들게 한다.
-async function factcheckVideoClaims(transcript, geminiApiKey, videoClaim, onItem = () => {}) {
+async function factcheckVideoClaims(transcript, geminiApiKey, videoClaim, onItem) {
   if (!transcript) return { videoFactchecks: [], reason: 'no_transcript' };
 
   const claims = await extractVideoClaims(transcript, geminiApiKey, MAX_VIDEO_CLAIM_TARGETS);
   if (!claims.length) return { videoFactchecks: [], reason: 'no_claims' };
 
+  onItem.start(claims.length);
   const results = await Promise.all(
     claims.map(async (claim) => {
       const verdict = await verifyVideoClaim(claim, geminiApiKey, videoClaim);
       const item = { claim, ...verdict };
-      onItem(item);
+      onItem.item(item, claims.length);
       return item;
     }),
   );
@@ -406,11 +414,12 @@ async function factcheckVideoClaims(transcript, geminiApiKey, videoClaim, onItem
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).
 // 웹서치가 붙는 verifyClaim(Gemini Pro)이 제일 느린 호출이라, 5개를 순차로 돌리면
 // 그 지연이 그대로 5배 쌓인다 — 병렬로 돌려서 "가장 느린 1개"의 시간만 들게 한다.
-async function factcheckComments(comments, geminiApiKey, videoClaim, transcriptSegments, onItem = () => {}) {
+async function factcheckComments(comments, geminiApiKey, videoClaim, transcriptSegments, onItem) {
   const topRebuttals = [...comments]
     .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0))
     .slice(0, MAX_FACTCHECK_TARGETS);
 
+  onItem.start(topRebuttals.length);
   const results = await Promise.all(
     topRebuttals.map(async (comment) => {
       // 댓글이 "09:02 시점에 언급된 선거는..."처럼 영상의 특정 구간을 지칭하면, 그 구간의
@@ -426,10 +435,15 @@ async function factcheckComments(comments, geminiApiKey, videoClaim, transcriptS
         parentText: comment.isReply ? comment.parentText : null,
         timestampContext,
       });
-      if (!claim) return null; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
+      if (!claim) {
+        // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵. 진행 표시가 오지 않을 건을
+        // 계속 기다리지 않도록 건너뛴 사실도 알린다.
+        onItem.skip(topRebuttals.length);
+        return null;
+      }
       const verdict = await verifyClaim(claim, geminiApiKey, videoClaim, timestampContext);
       const item = { comment: comment.textOriginal, claim, ...verdict };
-      onItem(item);
+      onItem.item(item, topRebuttals.length);
       return item;
     }),
   );
