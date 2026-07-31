@@ -149,6 +149,18 @@
   let potFromBodyCount = 0;
   let bodyUnreadableCount = 0;
 
+  // pot이 아예 안 생기는 세션이 관측됐다(player 요청을 10번 넘게 봤는데도 pot 0개). 기다림의
+  // 문제가 아니라 BotGuard가 애초에 못 도는 상황일 수 있어서, 챌린지 관련 요청이 나가긴 하는지
+  // /실패하는지를 따로 센다. 광고 차단기나 네트워크 정책이 이 도메인들을 막으면 pot은 영원히
+  // 안 생기고, 그건 확장 프로그램 쪽에서 고칠 수 있는 문제가 아니다.
+  const BOTGUARD_HINTS = ['jnn-pa.googleapis.com', '/js/th/', 'googlesyndication.com/bg/', 'google.com/js/bg'];
+  let botguardRequestCount = 0;
+  let botguardFailureCount = 0;
+
+  function isBotguardUrl(url) {
+    return typeof url === 'string' && BOTGUARD_HINTS.some((hint) => url.indexOf(hint) !== -1);
+  }
+
   function notePath(url, hadPot) {
     try {
       const path = new URL(url, location.href).pathname;
@@ -266,6 +278,8 @@
             potFromUrlCount,
             potFromBodyCount,
             bodyUnreadableCount,
+            botguardRequestCount,
+            botguardFailureCount,
             videoIdsWithPot: Array.from(potByVideoId.keys()),
           },
         }),
@@ -281,6 +295,19 @@
 
     if (url) {
       harvestPotFromUrl(url);
+      if (isBotguardUrl(url)) {
+        botguardRequestCount++;
+        return originalFetch.apply(this, arguments).then(
+          (res) => {
+            if (!res.ok) botguardFailureCount++;
+            return res;
+          },
+          (err) => {
+            botguardFailureCount++;
+            throw err;
+          },
+        );
+      }
       if (isInnertubeRequest(url)) {
         // 본문은 init.body(문자열/Blob/ArrayBuffer 등)이거나 Request 객체 안에 있다.
         // 어느 쪽이든 원본 요청을 건드리지 않도록 복제해서 비동기로 읽는다 — 실패해도
@@ -329,11 +356,19 @@
     this.__sfcTimedtextUrl = typeof url === 'string' && url.indexOf('/api/timedtext') !== -1 ? url : null;
     this.__sfcIsInnertube = isInnertubeRequest(url);
     this.__sfcInnertubeUrl = this.__sfcIsInnertube ? url : null;
+    this.__sfcIsBotguard = isBotguardUrl(url);
     if (typeof url === 'string') harvestPotFromUrl(url);
     return originalOpen.call(this, method, url, ...rest);
   };
 
   OriginalXHR.prototype.send = function (...args) {
+    if (this.__sfcIsBotguard) {
+      botguardRequestCount++;
+      this.addEventListener('error', () => botguardFailureCount++);
+      this.addEventListener('load', () => {
+        if (this.status >= 400 || this.status === 0) botguardFailureCount++;
+      });
+    }
     if (this.__sfcIsInnertube) {
       if (args[0] != null) harvestPotFromRequestBody(args[0], this.__sfcInnertubeUrl);
       else notePath(this.__sfcInnertubeUrl, false);

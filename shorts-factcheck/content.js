@@ -900,7 +900,16 @@
         d.bodyUnreadableCount,
         '| pot 보유 영상:',
         d.videoIdsWithPot?.length || 0,
+        '| BotGuard 요청:',
+        `${d.botguardRequestCount || 0}건 (실패 ${d.botguardFailureCount || 0})`,
       );
+      // 요청이 나가지도 않거나 전부 실패하면 pot은 영원히 안 생긴다 — 확장 프로그램이
+      // 고칠 수 있는 범위 밖이므로 원인을 분명히 알려준다.
+      if (!d.botguardRequestCount) {
+        console.warn('[SFC transcript][pot] BotGuard 요청이 한 번도 안 나갔습니다 — 이 브라우저에서 pot이 생성되지 않는 환경으로 보입니다(광고 차단기/네트워크 정책 등).');
+      } else if (d.botguardFailureCount >= d.botguardRequestCount) {
+        console.warn('[SFC transcript][pot] BotGuard 요청이 전부 실패했습니다 — 해당 도메인이 차단된 것으로 보입니다. 차단을 풀지 않으면 자막 pot은 못 얻습니다.');
+      }
     };
     document.addEventListener('sfc-pot-debug-result', onResult);
     document.dispatchEvent(new CustomEvent('sfc-pot-debug-query'));
