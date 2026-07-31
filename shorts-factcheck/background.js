@@ -29,23 +29,148 @@ async function getKeys() {
 // 우리가 직접 fetch로 watch 페이지를 다시 받아서 파싱하면, 그 응답엔 브라우저가 실제로 실행한
 // player.js가 나중에 채워 넣는 값(예: pot 토큰)이 빠져 있을 수 있다 — 서명 검증에 걸려
 // 200 OK인데 본문이 빈 응답으로 오는 증상과 정확히 들어맞는다.
+//
+// 실측 결과 일반 /watch 페이지의 #movie_player + window.ytInitialPlayerResponse로는 쇼츠에서
+// 트랙을 못 찾았다 — 쇼츠는 세로 피드로 영상이 넘어갈 때 SPA 전환이라 이 전역이 갱신되지 않고,
+// 플레이어 컨테이너 자체도 다른 구조를 쓰는 것으로 보인다. 정확한 내부 구조를 실제 브라우저
+// 없이는 확신할 수 없어, 알려진 후보를 여러 개 순서대로 시도한다.
 function mainWorldGetCaptionTracks() {
+  function tracksFrom(playerResponse) {
+    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
+    return Array.isArray(tracks) && tracks.length ? tracks : null;
+  }
+
   try {
-    let playerResponse = window.ytInitialPlayerResponse;
-    if (!playerResponse || !playerResponse.captions) {
-      const player = document.querySelector('#movie_player');
-      if (player && typeof player.getPlayerResponse === 'function') {
-        playerResponse = player.getPlayerResponse();
+    let tracks = tracksFrom(window.ytInitialPlayerResponse);
+
+    if (!tracks) {
+      const moviePlayer = document.querySelector('#movie_player');
+      if (moviePlayer && typeof moviePlayer.getPlayerResponse === 'function') {
+        tracks = tracksFrom(moviePlayer.getPlayerResponse());
       }
     }
-    const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
-    if (!Array.isArray(tracks)) return [];
+
+    if (!tracks) {
+      // 쇼츠 전용 플레이어 컨테이너로 알려진/추정되는 후보들. 정확한 구조를 확신할 수 없어
+      // 여러 셀렉터를 넓게 시도하고, getPlayerResponse를 제공하는 첫 번째 것을 쓴다.
+      const candidates = document.querySelectorAll(
+        '#shorts-player, ytd-reel-video-renderer[is-active] #player, ytd-reel-video-renderer #player, ytd-shorts [id*="player"]',
+      );
+      for (const el of candidates) {
+        if (el && typeof el.getPlayerResponse === 'function') {
+          tracks = tracksFrom(el.getPlayerResponse());
+          if (tracks) break;
+        }
+      }
+    }
+
+    if (!tracks) {
+      // 마지막 수단: 페이지 안의 모든 후보 엘리먼트 중 getPlayerResponse를 제공하는 것을 훑는다.
+      const anyPlayerEl = Array.from(document.querySelectorAll('[id*="player"]')).find(
+        (el) => typeof el.getPlayerResponse === 'function',
+      );
+      if (anyPlayerEl) tracks = tracksFrom(anyPlayerEl.getPlayerResponse());
+    }
+
+    if (!tracks) return [];
     return tracks
       .filter((t) => t && t.baseUrl)
       .map((t) => ({ langCode: t.languageCode, kind: t.kind || null, baseUrl: t.baseUrl }));
   } catch {
     return [];
   }
+}
+
+// 확정된 근본 원인(README 참고)은 BotGuard의 pot 토큰이 정적 스냅샷 어디에도 없고, 유튜브 자신의
+// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다. 남은 방법은 우리가
+// URL을 조립하지 않고, 유튜브 자신의 코드가 그 요청을 쏘도록 유도한 뒤 가로채는 것뿐이다.
+// 신뢰도가 낮다는 걸 명확히 밝힌다 — 아래 셀렉터/플레이어 API 호출은 실제 브라우저 없이 검증할
+// 방법이 없다. 안 되면 [SFC transcript][capture] 로그를 보고 다음 수를 정한다.
+function mainWorldCaptureRealCaption() {
+  return new Promise((resolve) => {
+    const TIMEOUT_MS = 4500;
+    let settled = false;
+    const originalFetch = window.fetch;
+    let timeoutId;
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      window.fetch = originalFetch;
+      clearTimeout(timeoutId);
+      console.log('[SFC transcript][capture] finished:', result.reason || (result.ok ? 'ok' : 'fail'));
+      resolve(result);
+    }
+
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : input && input.url;
+      if (url && url.indexOf('/api/timedtext') !== -1) {
+        console.log('[SFC transcript][capture] intercepted timedtext fetch');
+        return originalFetch.call(this, input, init).then((res) => {
+          res
+            .clone()
+            .text()
+            .then((text) => finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' }))
+            .catch(() => finish({ ok: false, reason: 'read_error' }));
+          return res;
+        });
+      }
+      return originalFetch.apply(this, arguments);
+    };
+
+    timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);
+
+    function findPlayerEl() {
+      return (
+        document.querySelector('#movie_player') ||
+        document.querySelector('#shorts-player') ||
+        document.querySelector('ytd-reel-video-renderer[is-active] #player') ||
+        document.querySelector('ytd-reel-video-renderer #player') ||
+        Array.from(document.querySelectorAll('[id*="player"]')).find(
+          (el) => typeof el.loadModule === 'function' || typeof el.setOption === 'function',
+        ) ||
+        null
+      );
+    }
+
+    let triggered = false;
+    try {
+      const player = findPlayerEl();
+      if (player && typeof player.loadModule === 'function') {
+        player.loadModule('captions');
+        triggered = true;
+        console.log('[SFC transcript][capture] called loadModule(captions)');
+      }
+      if (player && typeof player.setOption === 'function') {
+        let track = null;
+        try {
+          const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
+          track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
+        } catch {
+          // getOption 자체가 없거나 실패해도 무시하고 진행
+        }
+        player.setOption('captions', 'track', track || {});
+        triggered = true;
+        console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
+      }
+    } catch (err) {
+      console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+    }
+
+    if (!triggered) {
+      const btn =
+        document.querySelector('.ytp-subtitles-button') ||
+        document.querySelector('button[aria-label*="자막"]') ||
+        document.querySelector('button[aria-label*="caption" i]') ||
+        document.querySelector('button[aria-label*="subtitle" i]');
+      if (btn) {
+        console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
+        btn.click();
+      } else {
+        console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
+      }
+    }
+  });
 }
 
 async function handle(message, sender) {
@@ -76,16 +201,44 @@ async function handle(message, sender) {
     }
 
     case 'GET_CAPTION_TRACKS': {
-      if (!sender?.tab?.id) return { tracks: [] };
+      if (!sender?.tab?.id) {
+        console.warn('[SFC transcript] GET_CAPTION_TRACKS: no sender.tab.id, cannot inject into MAIN world');
+        return { tracks: [] };
+      }
+      if (!chrome.scripting) {
+        console.error('[SFC transcript] chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension in chrome://extensions.');
+        return { tracks: [] };
+      }
       try {
         const [injection] = await chrome.scripting.executeScript({
           target: { tabId: sender.tab.id },
           world: 'MAIN',
           func: mainWorldGetCaptionTracks,
         });
-        return { tracks: Array.isArray(injection?.result) ? injection.result : [] };
-      } catch {
+        const tracks = Array.isArray(injection?.result) ? injection.result : [];
+        console.info('[SFC transcript] MAIN-world extraction returned', tracks.length, 'tracks for tab', sender.tab.id);
+        return { tracks };
+      } catch (err) {
+        console.error('[SFC transcript] chrome.scripting.executeScript failed:', err?.message || err);
         return { tracks: [] };
+      }
+    }
+
+    // 마지막 폴백 — pot 토큰은 정적 데이터로 존재하지 않으므로, 유튜브 자신의 코드가 캡션을
+    // 요청하도록 유도(player API 또는 CC 버튼 클릭)한 뒤 그 실제 네트워크 요청을 가로챈다.
+    case 'CAPTURE_REAL_CAPTION': {
+      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab' };
+      if (!chrome.scripting) return { ok: false, reason: 'no_scripting' };
+      try {
+        const [injection] = await chrome.scripting.executeScript({
+          target: { tabId: sender.tab.id },
+          world: 'MAIN',
+          func: mainWorldCaptureRealCaption,
+        });
+        return injection?.result || { ok: false, reason: 'no_result' };
+      } catch (err) {
+        console.error('[SFC transcript][capture] executeScript failed:', err?.message || err);
+        return { ok: false, reason: 'error' };
       }
     }
 
