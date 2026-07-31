@@ -13,6 +13,11 @@
   let lastAnalyzedVideoId = null; // 패널에 지금 표시된 내용이 어느 영상 것인지 (꺼진 동안 영상이 바뀌었는지 판단용)
   let currentSourceComments = [];
   let runToken = 0; // 빠른 스크롤 중 이전 분석 결과가 늦게 도착해 덮어쓰는 것을 방지
+
+  // 판정이 하나씩 도착할 때마다 패널에 덧붙이기 위한 진행 상태. background.js가 각 항목을
+  // 끝나는 즉시 보내오는데(FACTCHECK_PROGRESS), 그걸 그릴 때 필요한 맥락(영상 주장 등)이
+  // 메시지엔 없으므로 여기에 들고 있는다.
+  let liveFactcheck = null;
   let pollTimerId = null;
   let contextInvalidated = false;
 
@@ -60,6 +65,26 @@
       panelEl.innerHTML =
         '<div class="sfc-section"><div class="sfc-section-body"><p class="sfc-note">확장 프로그램이 업데이트되었습니다. 이 탭을 새로고침(F5)하면 다시 정상 작동합니다.</p></div></div>';
     }
+  }
+
+  // background.js가 판정 1건이 끝날 때마다 보내온다. 화면에 이미 떠 있는 항목 뒤에
+  // 덧붙이기만 하므로, 가장 느린 판정을 기다리지 않고 끝난 것부터 바로 볼 수 있다.
+  function listenForFactcheckProgress() {
+    if (!isExtensionContextValid()) return;
+    chrome.runtime.onMessage.addListener((msg) => {
+      if (!msg || msg.type !== 'FACTCHECK_PROGRESS' || !msg.item) return;
+      const state = liveFactcheck;
+      // 이미 다른 영상으로 넘어갔으면 늦게 도착한 결과는 버린다.
+      if (!state || msg.videoId !== state.videoId || state.videoId !== currentVideoId) return;
+
+      if (msg.kind === 'video') {
+        state.videoItems.push(msg.item);
+        renderVideoCheckSection(state.videoItems, state.videoClaim, state.transcriptReason, state.claimSource, null, true);
+      } else {
+        state.rebuttalItems.push(msg.item);
+        renderFactcheckSection(state.rebuttalItems, true);
+      }
+    });
   }
 
   function sendMessage(msg) {
@@ -323,7 +348,7 @@
 
   // 영상이 스스로 한 말이 맞는지를 보여주는 섹션. 댓글이 뭐라고 하든 무관하게 독립적으로
   // 판정한 결과라, 반박 댓글 섹션과 분리해서 맨 위에 둔다.
-  function renderVideoCheckSection(videoFactchecks, videoClaim, transcriptReason, claimSource, videoCheckReason) {
+  function renderVideoCheckSection(videoFactchecks, videoClaim, transcriptReason, claimSource, videoCheckReason, pending) {
     const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
       ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
       : '';
@@ -334,8 +359,8 @@
       ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
       : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
 
-    if (videoFactchecks && videoFactchecks.length) {
-      setSectionBody('videocheck', summaryHtml + renderVerdictItems(videoFactchecks, '영상'));
+    if ((videoFactchecks && videoFactchecks.length) || pending) {
+      renderIncremental('videocheck', summaryHtml, videoFactchecks || [], '영상', !!pending);
       return;
     }
 
@@ -352,12 +377,40 @@
     setSectionBody('videocheck', summaryHtml + `<p class="sfc-note">${escapeHtml(note)}</p>`);
   }
 
-  function renderFactcheckSection(factchecks) {
-    if (!factchecks || !factchecks.length) {
+  // 판정이 끝나는 대로 하나씩 덧붙인다. 전체를 다시 그리면 이미 떠 있던 항목까지 등장
+  // 애니메이션이 다시 돌아 화면이 깜빡이므로, 아직 안 그린 항목만 뒤에 append한다.
+  function renderIncremental(section, headerHtml, items, label, pending) {
+    const body = panelEl?.querySelector(`.sfc-section[data-section="${section}"] .sfc-section-body`);
+    if (!body) return;
+
+    let list = body.querySelector('.sfc-fc-list');
+    if (!list) {
+      body.innerHTML = `${headerHtml}<div class="sfc-fc-list"></div>`;
+      list = body.querySelector('.sfc-fc-list');
+      list.dataset.rendered = '0';
+    }
+
+    const already = Number(list.dataset.rendered || 0);
+    if (items.length > already) {
+      list.insertAdjacentHTML('beforeend', renderVerdictItems(items.slice(already), label));
+      list.dataset.rendered = String(items.length);
+    }
+
+    const note = body.querySelector('.sfc-pending-note');
+    if (pending && !note) {
+      body.insertAdjacentHTML('beforeend', '<p class="sfc-note sfc-pending-note">나머지 항목 검증 중…</p>');
+    } else if (!pending && note) {
+      note.remove();
+    }
+  }
+
+  function renderFactcheckSection(factchecks, pending) {
+    const items = factchecks || [];
+    if (!pending && !items.length) {
       setSectionBody('factcheck', '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
       return;
     }
-    setSectionBody('factcheck', renderVerdictItems(factchecks, '반박'));
+    renderIncremental('factcheck', '', items, '반박', !!pending);
   }
 
   function showOriginalMessage(msg) {
@@ -1023,6 +1076,7 @@
       if (!transcriptText) return { videoFactchecks: [], reason: 'no_transcript' };
       return sendMessage({
         type: 'FACTCHECK_VIDEO',
+        videoId,
         transcript: transcriptText,
         videoClaim: claimRes.videoClaim || null,
       }).catch(() => ({ videoFactchecks: [], reason: 'error' }));
@@ -1100,12 +1154,28 @@
     const transcriptReason = videoClaimRes.transcriptReason || null;
     const claimSource = videoClaimRes.claimSource || null;
 
+    // 판정이 끝나는 대로 한 건씩 그려 넣기 위한 상태. FACTCHECK_PROGRESS 리스너가 이걸 본다.
+    liveFactcheck = {
+      videoId,
+      videoClaim,
+      transcriptReason,
+      claimSource,
+      videoItems: [],
+      rebuttalItems: [],
+    };
+    if (isCurrent()) {
+      // 결과가 도착하기 전에도 "검증 중" 상태를 먼저 보여준다 — 빈 스켈레톤만 오래 떠 있는
+      // 것보다 영상 주장 요약이라도 먼저 읽을 수 있는 편이 낫다.
+      renderVideoCheckSection([], videoClaim, transcriptReason, claimSource, null, true);
+      if (rebuttalComments.length) renderFactcheckSection([], true);
+    }
+
     // 영상 주장 검증과 반박 댓글 팩트체크는 서로 독립적이라 동시에 돌린다 — 둘 다 웹서치가
     // 붙은 느린 호출이라 순차로 하면 대기 시간이 그대로 두 배가 된다.
     const [videoCheck, fcRes] = await Promise.all([
       videoCheckPromise,
       rebuttalComments.length
-        ? sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim, transcriptSegments })
+        ? sendMessage({ type: 'FACTCHECK_COMMENTS', videoId, comments: rebuttalComments, videoClaim, transcriptSegments })
         : Promise.resolve({ factchecks: [] }),
     ]);
 
@@ -1151,6 +1221,7 @@
   function onVideoChange(videoId) {
     currentVideoId = videoId;
     currentSourceComments = [];
+    liveFactcheck = null; // 이전 영상의 판정이 늦게 도착해도 새 패널에 섞이지 않게 한다
     runToken++;
     const token = runToken;
 
@@ -1193,6 +1264,7 @@
 
   (async function init() {
     await loadPanelState(); // 첫 렌더 전에 저장된 최소화/끄기 상태부터 읽어온다
+    listenForFactcheckProgress();
 
     document.addEventListener('yt-navigate-finish', checkRoute);
     window.addEventListener('popstate', checkRoute);

@@ -258,6 +258,42 @@
 #sfc-panel .sfc-factcheck-item {
   padding: 8px 0;
   border-top: 1px solid #f0f0f0;
+  /* 판정이 끝나는 대로 한 건씩 덧붙기 때문에, 새로 들어온 항목만 살짝 떠오르게 한다.
+     (이미 그린 항목은 다시 그리지 않으므로 이 애니메이션이 재생되지 않는다) */
+  animation: sfc-item-in 0.28s ease-out;
+}
+
+@keyframes sfc-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 아직 판정 중인 항목이 남아 있다는 표시 — 점 세 개가 천천히 깜빡인다 */
+#sfc-panel .sfc-pending-note::after {
+  content: '';
+  animation: sfc-pending-dots 1.2s steps(4, end) infinite;
+}
+
+@keyframes sfc-pending-dots {
+  0% { content: ''; }
+  25% { content: '.'; }
+  50% { content: '..'; }
+  75% { content: '...'; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #sfc-panel .sfc-factcheck-item {
+    animation: none;
+  }
+  #sfc-panel .sfc-pending-note::after {
+    animation: none;
+  }
 }
 
 #sfc-panel .sfc-factcheck-item:first-child {
