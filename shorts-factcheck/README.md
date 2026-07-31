@@ -28,6 +28,9 @@
 ## 아키텍처
 
 ```
+main-world-hook.js (document_start, MAIN 월드 — fetch/XHR 영구 후킹, 커스텀 이벤트로 통지)
+    │  document.dispatchEvent('sfc-caption-captured')
+    ▼
 content.js (패널 주입, videoId 감지, 프레임 캡처, 자막(timedtext) 직접 fetch)
     │  chrome.runtime.sendMessage
     ▼
@@ -74,11 +77,20 @@ Token) 파라미터가 요청에 없어서다. `pot`은 정적 데이터가 아�
 **4번째(최후) 수단으로 캡처 방식을 추가했다.** 유튜브 자신의 코드가 캡션을 요청하게 유도한 뒤(플레이어
 API `loadModule('captions')`/`setOption('captions', 'track', ...)` 우선 시도, 안 먹히면 CC 버튼 클릭
 폴백) 그 실제 네트워크 요청을 가로챈다 — 이건 유튜브 자신의 코드가 만든 요청이라 pot이 정상적으로
-실려있을 것이라는 전제다. `background.js`의 `mainWorldCaptureRealCaption()` + content.js
-`fetchTranscript()`의 4단계로 구현되어 있고, 콘솔에 `[SFC transcript][capture]` 태그로 각 단계를 찍는다.
-`window.fetch`와 `XMLHttpRequest.prototype.open/send` 둘 다 후킹한다 — 실측 결과 `loadModule`/
-`setOption` 호출까지는 성공해도 fetch 후킹엔 아무것도 안 잡히는 경우가 있었는데, 실제 플레이어의
-자막 요청이 fetch가 아니라 XHR로 나가고 있었을 가능성이 높다.
+실려있을 것이라는 전제다.
+
+처음엔 이 후킹을 `chrome.scripting.executeScript`로 캡션을 요청하려는 "그 순간에" 걸었는데, 실측
+결과 `loadModule`/`setOption` 호출은 에러 없이 성공하는데도 `window.fetch`·`XMLHttpRequest` 후킹
+둘 다 아무 요청도 못 잡았다. 유튜브 자신의 코드가 그 시점 이전에 이미 원본 fetch/XHR 참조를 어딘가에
+캐싱해뒀다면, 나중에 우리가 `window.fetch`를 바꿔치기해도 그 캐싱된 참조에는 전혀 보이지 않기
+때문으로 보인다. 그래서 실제 후킹은 **`main-world-hook.js`로 분리해 `document_start` 시점(유튜브
+자신의 스크립트가 실행되기도 전)에 영구적으로 걸어둔다** — `manifest.json`에 `world: "MAIN"`,
+`run_at: "document_start"`로 별도 등록되어 있다. 잡힌 응답은 `document`에 커스텀 이벤트
+(`sfc-caption-captured`)로 던져지고, content.js가 `document.addEventListener`로 직접 듣는다
+(MAIN 월드와 격리된 세계는 변수를 공유 못 하므로 DOM 이벤트로만 통신 가능). `background.js`의
+`mainWorldTriggerCaptionLoad()`는 순수하게 "캡션을 요청하도록 유도"만 담당하고, content.js
+`fetchTranscript()`의 4단계가 이벤트를 기다린다. 콘솔에 `[SFC transcript][capture]` 태그로 각
+단계를 찍는다.
 
 **단, 이건 명백히 신뢰도가 낮은 실험적 경로임을 밝힌다:**
 1. 쇼츠의 CC 버튼/플레이어 컨테이너 셀렉터를 실제 브라우저 없이 확신할 수 없다(롱폼의
@@ -92,7 +104,9 @@ API `loadModule('captions')`/`setOption('captions', 'track', ...)` 우선 시도
    더해진다 — "쇼츠 시청 시간의 절반 안에 끝내야 한다"는 속도 목표와 정면으로 부딪힌다. ASR 자막
    영상에서는 사실상 매번 이 최후 수단까지 가게 되므로, 실사용에서 체감 속도가 나빠지면 타임아웃을
    줄이거나 이 단계 자체를 끄는 것을 고려해야 한다.
-3. BotGuard는 구글이 의도적으로 만든 안티스크래핑 장벽이라, 이 경로도 결국 안 뚫릴 수 있다.
+3. BotGuard는 구글이 의도적으로 만든 안티스크래핑 장벽이라, `document_start` 후킹으로도 결국 안
+   뚫릴 수 있다 — `loadModule`/`setOption` 호출 자체가 진짜 내부 재생 로직을 안 건드리고 있을
+   가능성도 있다.
 
 **그래서 제목/설명 기반 추정(`claimSource: 'meta'`)은 캡처까지 실패했을 때의 "정식 처리 경로"로
 유지된다.** 패널에 "(자막 접근 제한 — 제목/설명 기반 추정)" 배지를 명확히 달아 자막 기반 결과와

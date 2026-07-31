@@ -91,147 +91,85 @@ function mainWorldGetCaptionTracks(expectedVideoId) {
 }
 
 // 확정된 근본 원인(README 참고)은 BotGuard의 pot 토큰이 정적 스냅샷 어디에도 없고, 유튜브 자신의
-// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다. 남은 방법은 우리가
-// URL을 조립하지 않고, 유튜브 자신의 코드가 그 요청을 쏘도록 유도한 뒤 가로채는 것뿐이다.
-// 신뢰도가 낮다는 걸 명확히 밝힌다 — 아래 셀렉터/플레이어 API 호출은 실제 브라우저 없이 검증할
-// 방법이 없다. 안 되면 [SFC transcript][capture] 로그를 보고 다음 수를 정한다.
-function mainWorldCaptureRealCaption(expectedVideoId) {
-  return new Promise((resolve) => {
-    const TIMEOUT_MS = 4500;
-    let settled = false;
-    const originalFetch = window.fetch;
-    const OriginalXHR = window.XMLHttpRequest;
-    const originalXhrOpen = OriginalXHR.prototype.open;
-    const originalXhrSend = OriginalXHR.prototype.send;
-    let timeoutId;
+// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다.
+//
+// 처음엔 이 함수 자체가 fetch/XMLHttpRequest를 그때그때 후킹했는데, 실측 결과 loadModule/setOption
+// 호출은 에러 없이 성공하는데도 fetch·XHR 후킹 둘 다 아무 요청도 못 잡았다 — 유튜브 자신의 코드가
+// 이 시점(우리가 나중에 주입될 때) 이전에 이미 원본 fetch/XHR 참조를 어딘가에 캐싱해뒀다면, 그
+// 이후에 우리가 window.fetch를 바꿔치기해도 그 캐싱된 참조에는 아예 보이지 않는다. 그래서 실제
+// 후킹은 main-world-hook.js로 옮겨 document_start 시점(유튜브 자신의 스크립트가 실행되기도 전)에
+// 영구적으로 걸어두고, 이 함수는 순수하게 "캡션을 요청하도록 유도"만 담당한다. 후킹이 잡은 응답은
+// document에 커스텀 이벤트(sfc-caption-captured)로 던져지고, content.js가 그걸 직접 듣는다.
+function mainWorldTriggerCaptionLoad(expectedVideoId) {
+  // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 후보 중 videoId가 실제로 맞는 것을 우선한다
+  // (안 맞는 플레이어에 loadModule/setOption을 걸면 엉뚱한 영상 캡션을 트리거하게 된다).
+  function findPlayerEl() {
+    const candidates = [
+      document.querySelector('#movie_player'),
+      document.querySelector('#shorts-player'),
+      document.querySelector('ytd-reel-video-renderer[is-active] #player'),
+      ...document.querySelectorAll('ytd-reel-video-renderer #player'),
+      ...document.querySelectorAll('[id*="player"]'),
+    ].filter((el) => el && (typeof el.loadModule === 'function' || typeof el.setOption === 'function'));
 
-    function isTargetTimedtextUrl(url) {
-      if (!url || url.indexOf('/api/timedtext') === -1) return false;
-      let requestVideoId = null;
-      try {
-        requestVideoId = new URL(url, location.href).searchParams.get('v');
-      } catch {
-        // URL 파싱 실패 시 검증 없이 진행
-      }
-      // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 가로챈 요청이 지금 보고 있는 영상 것이
-      // 맞는지 v= 파라미터로 확인한다 — 아니면 무시하고 계속 기다린다.
-      if (expectedVideoId && requestVideoId && requestVideoId !== expectedVideoId) {
-        console.log('[SFC transcript][capture] ignoring timedtext request for a different video', requestVideoId);
-        return false;
-      }
-      return true;
-    }
-
-    function finish(result) {
-      if (settled) return;
-      settled = true;
-      window.fetch = originalFetch;
-      OriginalXHR.prototype.open = originalXhrOpen;
-      OriginalXHR.prototype.send = originalXhrSend;
-      clearTimeout(timeoutId);
-      console.log('[SFC transcript][capture] finished:', result.reason || (result.ok ? 'ok' : 'fail'));
-      resolve(result);
-    }
-
-    window.fetch = function (input, init) {
-      const url = typeof input === 'string' ? input : input && input.url;
-      if (isTargetTimedtextUrl(url)) {
-        console.log('[SFC transcript][capture] intercepted timedtext fetch');
-        return originalFetch.call(this, input, init).then((res) => {
-          res
-            .clone()
-            .text()
-            .then((text) => finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' }))
-            .catch(() => finish({ ok: false, reason: 'read_error' }));
-          return res;
-        });
-      }
-      return originalFetch.apply(this, arguments);
-    };
-
-    // 실제 플레이어의 자막 요청이 fetch가 아니라 XMLHttpRequest로 나가는 경우를 대비한다 —
-    // 실측 결과 loadModule/setOption 호출까지는 성공했는데도 fetch 후킹엔 아무것도 안 잡혔다.
-    OriginalXHR.prototype.open = function (method, url, ...rest) {
-      this.__sfcTimedtextTarget = isTargetTimedtextUrl(url);
-      return originalXhrOpen.call(this, method, url, ...rest);
-    };
-    OriginalXHR.prototype.send = function (...args) {
-      if (this.__sfcTimedtextTarget) {
-        console.log('[SFC transcript][capture] intercepted timedtext XHR');
-        this.addEventListener('load', () => {
-          const text = this.responseText;
-          finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' });
-        });
-        this.addEventListener('error', () => finish({ ok: false, reason: 'xhr_error' }));
-      }
-      return originalXhrSend.apply(this, args);
-    };
-
-    timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);
-
-    // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 후보 중 videoId가 실제로 맞는 것을 우선한다
-    // (안 맞는 플레이어에 loadModule/setOption을 걸면 엉뚱한 영상 캡션을 트리거하게 된다).
-    function findPlayerEl() {
-      const candidates = [
-        document.querySelector('#movie_player'),
-        document.querySelector('#shorts-player'),
-        document.querySelector('ytd-reel-video-renderer[is-active] #player'),
-        ...document.querySelectorAll('ytd-reel-video-renderer #player'),
-        ...document.querySelectorAll('[id*="player"]'),
-      ].filter((el) => el && (typeof el.loadModule === 'function' || typeof el.setOption === 'function'));
-
-      if (expectedVideoId) {
-        const matched = candidates.find((el) => {
-          try {
-            return typeof el.getPlayerResponse === 'function' && el.getPlayerResponse()?.videoDetails?.videoId === expectedVideoId;
-          } catch {
-            return false;
-          }
-        });
-        if (matched) return matched;
-        console.log('[SFC transcript][capture] no player candidate matched expected videoId, falling back to first candidate (unverified)');
-      }
-      return candidates[0] || null;
-    }
-
-    let triggered = false;
-    try {
-      const player = findPlayerEl();
-      if (player && typeof player.loadModule === 'function') {
-        player.loadModule('captions');
-        triggered = true;
-        console.log('[SFC transcript][capture] called loadModule(captions)');
-      }
-      if (player && typeof player.setOption === 'function') {
-        let track = null;
+    if (expectedVideoId) {
+      const matched = candidates.find((el) => {
         try {
-          const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
-          track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
+          return typeof el.getPlayerResponse === 'function' && el.getPlayerResponse()?.videoDetails?.videoId === expectedVideoId;
         } catch {
-          // getOption 자체가 없거나 실패해도 무시하고 진행
+          return false;
         }
-        player.setOption('captions', 'track', track || {});
-        triggered = true;
-        console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
-      }
-    } catch (err) {
-      console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+      });
+      if (matched) return matched;
+      console.log('[SFC transcript][capture] no player candidate matched expected videoId, falling back to first candidate (unverified)');
     }
+    return candidates[0] || null;
+  }
 
-    if (!triggered) {
-      const btn =
-        document.querySelector('.ytp-subtitles-button') ||
-        document.querySelector('button[aria-label*="자막"]') ||
-        document.querySelector('button[aria-label*="caption" i]') ||
-        document.querySelector('button[aria-label*="subtitle" i]');
-      if (btn) {
-        console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
-        btn.click();
-      } else {
-        console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
-      }
+  let triggered = false;
+  let method = null;
+  try {
+    const player = findPlayerEl();
+    if (player && typeof player.loadModule === 'function') {
+      player.loadModule('captions');
+      triggered = true;
+      method = 'loadModule';
+      console.log('[SFC transcript][capture] called loadModule(captions)');
     }
-  });
+    if (player && typeof player.setOption === 'function') {
+      let track = null;
+      try {
+        const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
+        track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
+      } catch {
+        // getOption 자체가 없거나 실패해도 무시하고 진행
+      }
+      player.setOption('captions', 'track', track || {});
+      triggered = true;
+      method = method ? `${method}+setOption` : 'setOption';
+      console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
+    }
+  } catch (err) {
+    console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+  }
+
+  if (!triggered) {
+    const btn =
+      document.querySelector('.ytp-subtitles-button') ||
+      document.querySelector('button[aria-label*="자막"]') ||
+      document.querySelector('button[aria-label*="caption" i]') ||
+      document.querySelector('button[aria-label*="subtitle" i]');
+    if (btn) {
+      console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
+      btn.click();
+      triggered = true;
+      method = 'ccButtonClick';
+    } else {
+      console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
+    }
+  }
+
+  return { triggered, method };
 }
 
 async function handle(message, sender) {
@@ -294,20 +232,20 @@ async function handle(message, sender) {
     // 마지막 폴백 — pot 토큰은 정적 데이터로 존재하지 않으므로, 유튜브 자신의 코드가 캡션을
     // 요청하도록 유도(player API 또는 CC 버튼 클릭)한 뒤 그 실제 네트워크 요청을 가로챈다.
     case 'CAPTURE_REAL_CAPTION': {
-      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab', bgLog: 'no sender.tab.id' };
-      if (!chrome.scripting) return { ok: false, reason: 'no_scripting', bgLog: 'chrome.scripting unavailable' };
+      if (!sender?.tab?.id) return { triggered: false, bgLog: 'no sender.tab.id' };
+      if (!chrome.scripting) return { triggered: false, bgLog: 'chrome.scripting unavailable' };
       try {
         const [injection] = await chrome.scripting.executeScript({
           target: { tabId: sender.tab.id },
           world: 'MAIN',
-          func: mainWorldCaptureRealCaption,
+          func: mainWorldTriggerCaptionLoad,
           args: [message.videoId || null],
         });
-        return injection?.result || { ok: false, reason: 'no_result' };
+        return injection?.result || { triggered: false, bgLog: 'no_result' };
       } catch (err) {
         const note = `executeScript failed: ${err?.message || err}`;
         console.error('[SFC transcript][capture]', note);
-        return { ok: false, reason: 'error', bgLog: note };
+        return { triggered: false, bgLog: note };
       }
     }
 

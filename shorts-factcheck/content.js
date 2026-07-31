@@ -675,6 +675,30 @@
     }
   }
 
+  // main-world-hook.js(document_start, MAIN 월드)가 실제 timedtext 응답을 가로채면 document에
+  // 커스텀 이벤트로 던진다. content.js는 격리된 세계라 그 파일과 변수를 공유할 수 없으니 이
+  // 이벤트로만 통신한다. 리스너를 먼저 걸어둔 뒤에 트리거해야, 이벤트가 우리가 듣기 전에
+  // 지나가 버리는 경쟁 상태를 피할 수 있다.
+  function waitForCapturedCaption(videoId, timeoutMs) {
+    return new Promise((resolve) => {
+      let settled = false;
+      function onEvent(e) {
+        if (settled || !e.detail || e.detail.videoId !== videoId) return;
+        settled = true;
+        document.removeEventListener('sfc-caption-captured', onEvent);
+        clearTimeout(timer);
+        resolve(e.detail.text || null);
+      }
+      document.addEventListener('sfc-caption-captured', onEvent);
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('sfc-caption-captured', onEvent);
+        resolve(null);
+      }, timeoutMs);
+    });
+  }
+
   // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
   // 'no_tracks' | 'empty_track' | 'error' | 'ok'
   async function fetchTranscript(videoId) {
@@ -719,22 +743,26 @@
       }
 
       // 4) 마지막 수단 — pot 토큰은 우리가 만든 어떤 URL에도 실을 수 없으니, 유튜브 자신의
-      // 코드가 캡션을 요청하도록 유도하고 그 실제 요청을 가로챈다. 트랙 자체를 못 찾은
-      // 경우(no_tracks)에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어
-      // 자신은 캡션 데이터를 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
+      // 코드가 캡션을 요청하도록 유도하고 main-world-hook.js(document_start부터 영구적으로
+      // 걸려있는 후킹)가 가로챈 실제 요청을 이벤트로 받는다. 트랙 자체를 못 찾은 경우(no_tracks)
+      // 에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어 자신은 캡션 데이터를
+      // 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
       if (!text) {
         console.info('[SFC transcript][capture] trying real-caption capture as last resort');
+        const capturePromise = waitForCapturedCaption(videoId, 4500);
         try {
-          const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
-          if (captured?.bgLog) console.info('[SFC transcript][bg]', captured.bgLog);
-          if (captured?.ok && captured.text) {
-            text = parseAnyTranscriptFormat(captured.text);
-            console.info('[SFC transcript][capture] parsed length:', text.length);
-          } else {
-            console.info('[SFC transcript][capture] no usable capture:', captured?.reason);
-          }
+          const triggerRes = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
+          if (triggerRes?.bgLog) console.info('[SFC transcript][bg]', triggerRes.bgLog);
+          console.info('[SFC transcript][capture] trigger result:', triggerRes?.triggered, triggerRes?.method);
         } catch (err) {
-          console.warn('[SFC transcript][capture] message failed', err?.message || err);
+          console.warn('[SFC transcript][capture] trigger message failed', err?.message || err);
+        }
+        const capturedText = await capturePromise;
+        if (capturedText) {
+          text = parseAnyTranscriptFormat(capturedText);
+          console.info('[SFC transcript][capture] parsed length:', text.length);
+        } else {
+          console.info('[SFC transcript][capture] no event captured within timeout');
         }
       }
 
