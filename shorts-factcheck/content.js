@@ -333,6 +333,11 @@
   // 기다리는 것 말고 방법이 없다. 세션당 첫 영상에서만 한 번 겪는 비용이다.
   const POT_COLD_START_TIMEOUT_MS = 10000;
 
+  // 이 영상의 pot이 아직 안 왔을 때 기다리는 시간. 이미 있으면 즉시 응답이 오므로 평상시
+  // 속도에는 영향이 없다. 남의 pot으로 대신 요청하는 건 반드시 실패하므로, 일찍 포기하는
+  // 것보다 이만큼 기다려보는 쪽이 손해가 없다.
+  const POT_WAIT_MS = 5000;
+
   // fetchTranscript/extractVideoClaim이 실패한 단계를 그대로 화면에 노출한다 —
   // 개발자 콘솔을 열지 않아도 어느 단계에서 막혔는지 바로 보고할 수 있게 하기 위함.
   const TRANSCRIPT_REASON_LABEL = {
@@ -963,9 +968,12 @@
   async function fetchTrackWithPot(baseUrl, videoId) {
     let pot = null;
     if (requiresPotToken(baseUrl)) {
-      // 평소엔 2.5초면 충분하다(이미 pot이 있으면 즉시 온다). 콜드 로드처럼 BotGuard가 아직
-      // 아무것도 못 만든 상태로 확인되면 requestPotToken이 알아서 아래 긴 값으로 늘려 기다린다.
-      const res = await requestPotToken(videoId, 2500, POT_COLD_START_TIMEOUT_MS);
+      // 이 영상의 pot이 이미 있으면 즉시 응답이 오므로 이 대기는 "아직 안 온 경우"에만 걸린다.
+      // 예전엔 2.5초만 기다리고 남의 pot으로 넘어갔는데, **남의 pot은 100% 실패한다**(videoId
+      // 바인딩). 즉 일찍 포기해서 얻는 게 없으므로, 이 영상 pot이 올 때까지 넉넉히 기다리는 편이
+      // 언제나 낫다. 실측에서도 다른 영상 pot은 이미 있는데 이 영상 것만 늦게 도착하는 경우가
+      // 많았다(유튜브가 그 영상의 player 요청을 아직 안 끝낸 것뿐).
+      const res = await requestPotToken(videoId, POT_WAIT_MS, POT_COLD_START_TIMEOUT_MS);
       pot = res.pot;
       console.info(
         '[SFC transcript][pot] xpe/xpv detected — pot token:',
