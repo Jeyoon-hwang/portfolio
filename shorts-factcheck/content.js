@@ -496,14 +496,23 @@
       .replace(/&#(\d+);/g, (_, code) => String.fromCharCode(Number(code)));
   }
 
+  // 댓글이 "09:02 시점에 언급된 선거는..."처럼 특정 시점을 지칭하는 경우, 그 구간의 실제
+  // 자막을 함께 봐야 무엇을 가리키는지 판정할 수 있다. 그래서 이제 자막을 합친 평문(text)
+  // 뿐 아니라 각 줄의 시작 시각(초 단위)도 segments로 같이 들고 다닌다.
   function parseTranscriptText(xml) {
-    const textRe = /<text\b[^>]*>([\s\S]*?)<\/text>/g;
+    const textRe = /<text\b([^>]*)>([\s\S]*?)<\/text>/g;
+    const startRe = /\bstart="([\d.]+)"/;
     const parts = [];
+    const segments = [];
     let m;
     while ((m = textRe.exec(xml))) {
-      parts.push(decodeHtmlEntities(m[1]));
+      const text = decodeHtmlEntities(m[2]).replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      parts.push(text);
+      const startMatch = startRe.exec(m[1]);
+      if (startMatch) segments.push({ start: parseFloat(startMatch[1]), text });
     }
-    return parts.join(' ').replace(/\s+/g, ' ').trim();
+    return { text: parts.join(' ').replace(/\s+/g, ' ').trim(), segments };
   }
 
   // 실제 플레이어가 요청하는 자막은 XML이 아니라 json3 포맷({events:[{segs:[{utf8:"..."}]}]})으로
@@ -513,24 +522,31 @@
       const data = JSON.parse(raw);
       const events = Array.isArray(data?.events) ? data.events : [];
       const parts = [];
+      const segments = [];
       for (const ev of events) {
         if (!Array.isArray(ev.segs)) continue;
-        for (const seg of ev.segs) {
-          if (seg && seg.utf8) parts.push(seg.utf8);
-        }
+        const text = ev.segs
+          .map((seg) => (seg && seg.utf8) || '')
+          .join('')
+          .replace(/\n+/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (!text) continue;
+        parts.push(text);
+        if (typeof ev.tStartMs === 'number') segments.push({ start: ev.tStartMs / 1000, text });
       }
-      return parts.join('').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+      return { text: parts.join(' ').replace(/\s+/g, ' ').trim(), segments };
     } catch {
-      return '';
+      return { text: '', segments: [] };
     }
   }
 
   function parseAnyTranscriptFormat(raw) {
     const trimmed = (raw || '').trim();
-    if (!trimmed) return '';
+    if (!trimmed) return { text: '', segments: [] };
     if (trimmed[0] === '{') {
-      const text = parseJson3Transcript(trimmed);
-      if (text) return text;
+      const parsed = parseJson3Transcript(trimmed);
+      if (parsed.text) return parsed;
     }
     return parseTranscriptText(trimmed);
   }
@@ -614,14 +630,14 @@
     const res = await fetch(url);
     if (!res.ok) {
       console.warn('[SFC transcript] track fetch not ok', url, res.status);
-      return null;
+      return { text: '', segments: [] };
     }
     const raw = await res.text();
-    const text = parseTranscriptText(raw);
-    if (!text) {
+    const parsed = parseTranscriptText(raw);
+    if (!parsed.text) {
       console.warn('[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ')', url);
     }
-    return text;
+    return parsed;
   }
 
   // background.js를 거쳐 유튜브 페이지의 메인 월드(content script의 격리된 세계가 아니라
@@ -728,21 +744,21 @@
       }
 
       const track = pickTranscriptTrack(tracks);
-      let text = null;
+      let parsed = { text: '', segments: [] };
       let noTracksAtAll = !track || !track.baseUrl;
 
       if (!noTracksAtAll) {
         console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
-        text = await fetchOneTrackUrl(track.baseUrl);
+        parsed = await fetchOneTrackUrl(track.baseUrl);
 
         // 트랙은 찾았는데 다운로드가 비어 있으면 서명이 이미 만료됐을 가능성이 있다 —
         // Innertube에서 방금 새로 발급받은 baseUrl로 한 번만 더 시도한다.
-        if (!text && source !== 'innertube') {
+        if (!parsed.text && source !== 'innertube') {
           const freshTracks = await fetchTracksViaInnertube(videoId);
           const freshTrack = pickTranscriptTrack(freshTracks);
           if (freshTrack?.baseUrl) {
             console.info('[SFC transcript] retrying download with fresh innertube baseUrl');
-            text = await fetchOneTrackUrl(freshTrack.baseUrl);
+            parsed = await fetchOneTrackUrl(freshTrack.baseUrl);
           }
         }
       } else {
@@ -754,7 +770,7 @@
       // 걸려있는 후킹)가 가로챈 실제 요청을 이벤트로 받는다. 트랙 자체를 못 찾은 경우(no_tracks)
       // 에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어 자신은 캡션 데이터를
       // 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
-      if (!text) {
+      if (!parsed.text) {
         console.info('[SFC transcript][capture] trying real-caption capture as last resort');
         const capturePromise = waitForCapturedCaption(videoId, 4500);
         try {
@@ -766,18 +782,18 @@
         }
         const capturedText = await capturePromise;
         if (capturedText) {
-          text = parseAnyTranscriptFormat(capturedText);
-          console.info('[SFC transcript][capture] parsed length:', text.length);
+          parsed = parseAnyTranscriptFormat(capturedText);
+          console.info('[SFC transcript][capture] parsed length:', parsed.text.length);
         } else {
           console.info('[SFC transcript][capture] no event captured within timeout');
         }
       }
 
-      if (text) return { text, reason: 'ok' };
-      return { text: null, reason: noTracksAtAll ? 'no_tracks' : 'empty_track' };
+      if (parsed.text) return { text: parsed.text, segments: parsed.segments, reason: 'ok' };
+      return { text: null, segments: [], reason: noTracksAtAll ? 'no_tracks' : 'empty_track' };
     } catch (err) {
       console.error('[SFC transcript] unexpected error', videoId, err);
-      return { text: null, reason: 'error' };
+      return { text: null, segments: [], reason: 'error' };
     }
   }
 
@@ -809,14 +825,19 @@
     // 도달할 때쯤(댓글 수집 + 분류가 끝난 뒤)이면 이 가벼운 호출은 이미 끝나 있을 것이다.
     // 자막은 이 페이지(content script) 자체에서 가져오고, Gemini 추출만 background에 맡긴다.
     const commentsPromise = sendMessage({ type: 'GET_COMMENTS', videoId });
+    // 반박 댓글이 "09:02 시점에 언급된..."처럼 특정 구간을 지칭할 때 그 구간 자막을 함께
+    // 판정에 넣어줄 수 있도록, FACTCHECK_COMMENTS를 부를 때 같이 넘길 수 있게 바깥 스코프에
+    // 잡아둔다 — videoClaimPromise 체인 안에서 fetchTranscript의 결과를 소비하며 채워진다.
+    let transcriptSegments = [];
     const videoClaimPromise = fetchTranscript(videoId)
-      .catch(() => ({ text: null, reason: 'error' }))
-      .then(({ text, reason }) =>
-        sendMessage({ type: 'GET_VIDEO_CLAIM', videoId, transcript: text, transcriptReason: reason }).catch(() => ({
+      .catch(() => ({ text: null, segments: [], reason: 'error' }))
+      .then(({ text, segments, reason }) => {
+        transcriptSegments = segments || [];
+        return sendMessage({ type: 'GET_VIDEO_CLAIM', videoId, transcript: text, transcriptReason: reason }).catch(() => ({
           videoClaim: null,
           transcriptReason: reason,
-        })),
-      );
+        }));
+      });
 
     const commentsRes = await commentsPromise;
     if (token !== runToken) return;
@@ -872,7 +893,7 @@
 
     let factchecks = [];
     if (rebuttalComments.length) {
-      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim });
+      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim, transcriptSegments });
       if (fcRes.error) {
         if (isCurrent()) {
           setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);

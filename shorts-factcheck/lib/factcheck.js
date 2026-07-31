@@ -11,6 +11,10 @@ const EXTRACT_SYSTEM_PROMPT = `너는 유튜브 댓글에서 검증 가능한 �
 불분명한 경우, 주어진 맥락을 참고해 주장을 더 구체적으로 표현하라 (예: "게시글이 삭제됐다" → "OO시청 계곡 불법영업 논란 게시글이 삭제됐다").
 단, 맥락에 실제로 나오지 않는 내용을 추측해서 채워넣지는 마라 — 맥락이 없거나 관련이 없으면 댓글 내용 그대로만 정리하라.
 
+댓글이 "09:02 시점에 언급된 선거는..."처럼 영상의 특정 구간을 지칭하면, 그 구간 자막이 함께 주어질 수 있다.
+이 경우 그 자막에 실제로 나오는 내용으로 "그 선거"/"이 사건" 같은 지시 표현을 구체적인 대상으로 바꿔라
+(예: "그 선거는 부정선거가 아니다" + 해당 구간 자막이 "2024년 미국 대선을 보자" → "2024년 미국 대선은 부정선거가 아니다").
+
 출력은 반드시 JSON 객체 하나만 출력하라.
 주장이 있으면: {"has_claim":true,"claim":"검증 가능한 형태로 정리한 주장 한 문장"}
 주장이 없으면: {"has_claim":false}
@@ -37,6 +41,10 @@ const VERIFY_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 유튜브 쇼
 (영상 자막이 없어 영상 주장이 주어지지 않으면 반박 댓글 주장만 보고 판정하라).
 반박 댓글의 주장이 실제로 맞는지 웹 검색 결과에 근거해 판정하라 — 영상 주장은 맥락 참고용이지, 영상이 맞다고 전제하지 마라.
 
+반박 댓글이 영상의 특정 시점(예: "09:02")을 지칭하면, 그 구간의 실제 자막도 함께 주어질 수 있다. 이 자막을 근거로
+"그 선거", "해당 사건"처럼 불분명한 지시 표현이 구체적으로 무엇을 가리키는지 먼저 파악한 뒤 판정하라 — 이 자막이
+있는데도 무엇을 가리키는지 명확하다면, 대상을 특정할 수 없다는 이유만으로 "불충분"으로 판정하지 마라.
+
 판정 등급은 다음 4개 중 하나만 사용한다: "사실", "거짓", "불충분", "부분적 사실".
 이 도구는 오정보를 잡으려는 목적이므로, 근거가 부족하거나 검색 결과가 상충하면 억지로 사실/거짓으로 밀어붙이지 말고 반드시 "불충분"으로 판정하라.
 
@@ -55,10 +63,39 @@ function parseJsonObject(raw) {
   }
 }
 
+// "09:02"/"1:23:45" 같은 mm:ss·h:mm:ss 표기를 찾는다. 앞에 다른 숫자가 붙은 건(전화번호,
+// 큰 숫자의 일부 등) 제외하려고 경계에 숫자가 없어야 한다는 조건을 둔다.
+const TIMESTAMP_RE = /(?<!\d)(\d{1,2}):([0-5]\d)(?::([0-5]\d))?(?!\d)/;
+
+// 댓글이 언급하는 영상 속 시점을 초 단위로 뽑아낸다. 못 찾으면 null.
+export function findTimestampSeconds(text) {
+  if (!text) return null;
+  const m = TIMESTAMP_RE.exec(text);
+  if (!m) return null;
+  if (m[3] !== undefined) return Number(m[1]) * 3600 + Number(m[2]) * 60 + Number(m[3]);
+  return Number(m[1]) * 60 + Number(m[2]);
+}
+
+const TIMESTAMP_CONTEXT_BEFORE_SEC = 10;
+const TIMESTAMP_CONTEXT_AFTER_SEC = 20;
+
+// seconds 시점 전후의 자막만 잘라 이어붙인다. 영상 길이를 벗어난 시각이면(예: 1분짜리 쇼츠에
+// "09:02"를 댓글이 언급 — 이 영상 얘기가 아니거나 오탐) 엉뚱한 구간을 붙이지 않도록 null을 준다.
+export function buildTimestampContext(seconds, segments) {
+  if (seconds == null || !Array.isArray(segments) || !segments.length) return null;
+  const maxStart = segments.reduce((max, s) => Math.max(max, s.start), 0);
+  if (seconds > maxStart + TIMESTAMP_CONTEXT_AFTER_SEC) return null;
+  const matched = segments
+    .filter((s) => s.start >= seconds - TIMESTAMP_CONTEXT_BEFORE_SEC && s.start <= seconds + TIMESTAMP_CONTEXT_AFTER_SEC)
+    .map((s) => s.text);
+  return matched.length ? matched.join(' ') : null;
+}
+
 export async function extractClaim(commentText, apiKey, context) {
   const lines = [];
   if (context?.videoClaim) lines.push(`영상 주장: ${context.videoClaim}`);
   if (context?.parentText) lines.push(`원댓글(이 댓글이 답글로 달린 대상): ${context.parentText.replace(/\n+/g, ' ').slice(0, 300)}`);
+  if (context?.timestampContext) lines.push(`댓글이 지칭하는 시점의 영상 자막: ${context.timestampContext.slice(0, 1000)}`);
   lines.push(`댓글: ${(commentText || '').replace(/\n+/g, ' ').slice(0, 800)}`);
   const userPrompt = lines.join('\n');
 
@@ -122,8 +159,12 @@ export async function extractVideoClaimFromMeta(title, description, apiKey) {
   return null;
 }
 
-export async function verifyClaim(claim, apiKey, videoClaim) {
-  const userText = videoClaim ? `영상 주장: ${videoClaim}\n반박 댓글 주장: ${claim}` : `반박 댓글 주장: ${claim}`;
+export async function verifyClaim(claim, apiKey, videoClaim, timestampContext) {
+  const lines = [];
+  if (videoClaim) lines.push(`영상 주장: ${videoClaim}`);
+  if (timestampContext) lines.push(`댓글이 지칭하는 시점의 영상 자막: ${timestampContext.slice(0, 1000)}`);
+  lines.push(`반박 댓글 주장: ${claim}`);
+  const userText = lines.join('\n');
   const data = await callGemini(GEMINI_PRO_MODEL, VERIFY_SYSTEM_PROMPT, userText, apiKey, [{ googleSearch: {} }]);
 
   if (isGeminiBlocked(data)) {

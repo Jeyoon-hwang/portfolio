@@ -2,7 +2,14 @@
 // content script는 격리된 세계이지만 페이지와 컨텍스트를 공유하므로 API 키를 여기서 다루지 않는다.
 import { fetchComments, fetchUploadDate, fetchVideoSnippet } from './lib/youtube.js';
 import { classifyComments } from './lib/classifier.js';
-import { extractClaim, extractVideoClaim, extractVideoClaimFromMeta, verifyClaim } from './lib/factcheck.js';
+import {
+  extractClaim,
+  extractVideoClaim,
+  extractVideoClaimFromMeta,
+  verifyClaim,
+  findTimestampSeconds,
+  buildTimestampContext,
+} from './lib/factcheck.js';
 import { reverseSearch, extractYoutubeVideoId, extractUrlsFromText } from './lib/reverse-search.js';
 import { getCache, setCache } from './lib/cache.js';
 
@@ -321,7 +328,7 @@ async function handle(message, sender) {
     case 'FACTCHECK_COMMENTS': {
       const { geminiApiKey } = await getKeys();
       if (!geminiApiKey) return { error: 'missing_key' };
-      return await factcheckComments(message.comments, geminiApiKey, message.videoClaim || null);
+      return await factcheckComments(message.comments, geminiApiKey, message.videoClaim || null, message.transcriptSegments || []);
     }
 
     case 'FIND_ORIGINAL': {
@@ -344,19 +351,28 @@ async function handle(message, sender) {
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).
 // 웹서치가 붙는 verifyClaim(Gemini Pro)이 제일 느린 호출이라, 5개를 순차로 돌리면
 // 그 지연이 그대로 5배 쌓인다 — 병렬로 돌려서 "가장 느린 1개"의 시간만 들게 한다.
-async function factcheckComments(comments, geminiApiKey, videoClaim) {
+async function factcheckComments(comments, geminiApiKey, videoClaim, transcriptSegments) {
   const topRebuttals = [...comments]
     .sort((a, b) => (b.likeCount || 0) - (a.likeCount || 0))
     .slice(0, MAX_FACTCHECK_TARGETS);
 
   const results = await Promise.all(
     topRebuttals.map(async (comment) => {
+      // 댓글이 "09:02 시점에 언급된 선거는..."처럼 영상의 특정 구간을 지칭하면, 그 구간의
+      // 실제 자막을 함께 넣어줘야 "그 선거"가 뭔지 판정관이 특정할 수 있다. 답글이면 원댓글도
+      // 같이 확인한다 — 시점 언급은 원댓글에 있고 답글은 그걸 그대로 받아 얘기하는 경우가 많다.
+      const timestampSeconds =
+        findTimestampSeconds(comment.textOriginal) ||
+        (comment.isReply ? findTimestampSeconds(comment.parentText) : null);
+      const timestampContext = buildTimestampContext(timestampSeconds, transcriptSegments);
+
       const claim = await extractClaim(comment.textOriginal, geminiApiKey, {
         videoClaim,
         parentText: comment.isReply ? comment.parentText : null,
+        timestampContext,
       });
       if (!claim) return null; // 욕설/단순 의견 등 검증 불가능한 댓글은 스킵
-      const verdict = await verifyClaim(claim, geminiApiKey, videoClaim);
+      const verdict = await verifyClaim(claim, geminiApiKey, videoClaim, timestampContext);
       return { comment: comment.textOriginal, claim, ...verdict };
     }),
   );
