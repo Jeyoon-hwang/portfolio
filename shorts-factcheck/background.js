@@ -91,119 +91,85 @@ function mainWorldGetCaptionTracks(expectedVideoId) {
 }
 
 // 확정된 근본 원인(README 참고)은 BotGuard의 pot 토큰이 정적 스냅샷 어디에도 없고, 유튜브 자신의
-// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다. 남은 방법은 우리가
-// URL을 조립하지 않고, 유튜브 자신의 코드가 그 요청을 쏘도록 유도한 뒤 가로채는 것뿐이다.
-// 신뢰도가 낮다는 걸 명확히 밝힌다 — 아래 셀렉터/플레이어 API 호출은 실제 브라우저 없이 검증할
-// 방법이 없다. 안 되면 [SFC transcript][capture] 로그를 보고 다음 수를 정한다.
-function mainWorldCaptureRealCaption(expectedVideoId) {
-  return new Promise((resolve) => {
-    const TIMEOUT_MS = 4500;
-    let settled = false;
-    const originalFetch = window.fetch;
-    let timeoutId;
+// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다.
+//
+// 처음엔 이 함수 자체가 fetch/XMLHttpRequest를 그때그때 후킹했는데, 실측 결과 loadModule/setOption
+// 호출은 에러 없이 성공하는데도 fetch·XHR 후킹 둘 다 아무 요청도 못 잡았다 — 유튜브 자신의 코드가
+// 이 시점(우리가 나중에 주입될 때) 이전에 이미 원본 fetch/XHR 참조를 어딘가에 캐싱해뒀다면, 그
+// 이후에 우리가 window.fetch를 바꿔치기해도 그 캐싱된 참조에는 아예 보이지 않는다. 그래서 실제
+// 후킹은 main-world-hook.js로 옮겨 document_start 시점(유튜브 자신의 스크립트가 실행되기도 전)에
+// 영구적으로 걸어두고, 이 함수는 순수하게 "캡션을 요청하도록 유도"만 담당한다. 후킹이 잡은 응답은
+// document에 커스텀 이벤트(sfc-caption-captured)로 던져지고, content.js가 그걸 직접 듣는다.
+function mainWorldTriggerCaptionLoad(expectedVideoId) {
+  // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 후보 중 videoId가 실제로 맞는 것을 우선한다
+  // (안 맞는 플레이어에 loadModule/setOption을 걸면 엉뚱한 영상 캡션을 트리거하게 된다).
+  function findPlayerEl() {
+    const candidates = [
+      document.querySelector('#movie_player'),
+      document.querySelector('#shorts-player'),
+      document.querySelector('ytd-reel-video-renderer[is-active] #player'),
+      ...document.querySelectorAll('ytd-reel-video-renderer #player'),
+      ...document.querySelectorAll('[id*="player"]'),
+    ].filter((el) => el && (typeof el.loadModule === 'function' || typeof el.setOption === 'function'));
 
-    function finish(result) {
-      if (settled) return;
-      settled = true;
-      window.fetch = originalFetch;
-      clearTimeout(timeoutId);
-      console.log('[SFC transcript][capture] finished:', result.reason || (result.ok ? 'ok' : 'fail'));
-      resolve(result);
-    }
-
-    window.fetch = function (input, init) {
-      const url = typeof input === 'string' ? input : input && input.url;
-      if (url && url.indexOf('/api/timedtext') !== -1) {
-        // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 가로챈 요청이 지금 보고 있는 영상 것이
-        // 맞는지 v= 파라미터로 확인한다 — 아니면 무시하고 계속 기다린다.
-        let requestVideoId = null;
+    if (expectedVideoId) {
+      const matched = candidates.find((el) => {
         try {
-          requestVideoId = new URL(url, location.href).searchParams.get('v');
+          return typeof el.getPlayerResponse === 'function' && el.getPlayerResponse()?.videoDetails?.videoId === expectedVideoId;
         } catch {
-          // URL 파싱 실패 시 검증 없이 진행
+          return false;
         }
-        if (expectedVideoId && requestVideoId && requestVideoId !== expectedVideoId) {
-          console.log('[SFC transcript][capture] ignoring timedtext fetch for a different video', requestVideoId);
-          return originalFetch.apply(this, arguments);
-        }
-        console.log('[SFC transcript][capture] intercepted timedtext fetch');
-        return originalFetch.call(this, input, init).then((res) => {
-          res
-            .clone()
-            .text()
-            .then((text) => finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' }))
-            .catch(() => finish({ ok: false, reason: 'read_error' }));
-          return res;
-        });
-      }
-      return originalFetch.apply(this, arguments);
-    };
-
-    timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);
-
-    // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 후보 중 videoId가 실제로 맞는 것을 우선한다
-    // (안 맞는 플레이어에 loadModule/setOption을 걸면 엉뚱한 영상 캡션을 트리거하게 된다).
-    function findPlayerEl() {
-      const candidates = [
-        document.querySelector('#movie_player'),
-        document.querySelector('#shorts-player'),
-        document.querySelector('ytd-reel-video-renderer[is-active] #player'),
-        ...document.querySelectorAll('ytd-reel-video-renderer #player'),
-        ...document.querySelectorAll('[id*="player"]'),
-      ].filter((el) => el && (typeof el.loadModule === 'function' || typeof el.setOption === 'function'));
-
-      if (expectedVideoId) {
-        const matched = candidates.find((el) => {
-          try {
-            return typeof el.getPlayerResponse === 'function' && el.getPlayerResponse()?.videoDetails?.videoId === expectedVideoId;
-          } catch {
-            return false;
-          }
-        });
-        if (matched) return matched;
-        console.log('[SFC transcript][capture] no player candidate matched expected videoId, falling back to first candidate (unverified)');
-      }
-      return candidates[0] || null;
+      });
+      if (matched) return matched;
+      console.log('[SFC transcript][capture] no player candidate matched expected videoId, falling back to first candidate (unverified)');
     }
+    return candidates[0] || null;
+  }
 
-    let triggered = false;
-    try {
-      const player = findPlayerEl();
-      if (player && typeof player.loadModule === 'function') {
-        player.loadModule('captions');
-        triggered = true;
-        console.log('[SFC transcript][capture] called loadModule(captions)');
-      }
-      if (player && typeof player.setOption === 'function') {
-        let track = null;
-        try {
-          const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
-          track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
-        } catch {
-          // getOption 자체가 없거나 실패해도 무시하고 진행
-        }
-        player.setOption('captions', 'track', track || {});
-        triggered = true;
-        console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
-      }
-    } catch (err) {
-      console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+  let triggered = false;
+  let method = null;
+  try {
+    const player = findPlayerEl();
+    if (player && typeof player.loadModule === 'function') {
+      player.loadModule('captions');
+      triggered = true;
+      method = 'loadModule';
+      console.log('[SFC transcript][capture] called loadModule(captions)');
     }
+    if (player && typeof player.setOption === 'function') {
+      let track = null;
+      try {
+        const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
+        track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
+      } catch {
+        // getOption 자체가 없거나 실패해도 무시하고 진행
+      }
+      player.setOption('captions', 'track', track || {});
+      triggered = true;
+      method = method ? `${method}+setOption` : 'setOption';
+      console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
+    }
+  } catch (err) {
+    console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+  }
 
-    if (!triggered) {
-      const btn =
-        document.querySelector('.ytp-subtitles-button') ||
-        document.querySelector('button[aria-label*="자막"]') ||
-        document.querySelector('button[aria-label*="caption" i]') ||
-        document.querySelector('button[aria-label*="subtitle" i]');
-      if (btn) {
-        console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
-        btn.click();
-      } else {
-        console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
-      }
+  if (!triggered) {
+    const btn =
+      document.querySelector('.ytp-subtitles-button') ||
+      document.querySelector('button[aria-label*="자막"]') ||
+      document.querySelector('button[aria-label*="caption" i]') ||
+      document.querySelector('button[aria-label*="subtitle" i]');
+    if (btn) {
+      console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
+      btn.click();
+      triggered = true;
+      method = 'ccButtonClick';
+    } else {
+      console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
     }
-  });
+  }
+
+  return { triggered, method };
 }
 
 async function handle(message, sender) {
@@ -233,14 +199,17 @@ async function handle(message, sender) {
       return await fetchComments(message.videoId, youtubeApiKey);
     }
 
+    // 이 케이스와 CAPTURE_REAL_CAPTION의 console.warn/error는 서비스 워커 콘솔에만 찍혀서
+    // content.js가 있는 페이지 콘솔과 분리돼 있다 — 디버깅할 때 두 콘솔을 오가야 해서 계속
+    // 혼선이 있었다. 그래서 로그를 응답에도 담아 content.js가 자기 콘솔에 다시 찍게 한다.
     case 'GET_CAPTION_TRACKS': {
       if (!sender?.tab?.id) {
         console.warn('[SFC transcript] GET_CAPTION_TRACKS: no sender.tab.id, cannot inject into MAIN world');
-        return { tracks: [] };
+        return { tracks: [], bgLog: 'no sender.tab.id, cannot inject into MAIN world' };
       }
       if (!chrome.scripting) {
         console.error('[SFC transcript] chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension in chrome://extensions.');
-        return { tracks: [] };
+        return { tracks: [], bgLog: 'chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension.' };
       }
       try {
         const [injection] = await chrome.scripting.executeScript({
@@ -250,30 +219,33 @@ async function handle(message, sender) {
           args: [message.videoId || null],
         });
         const tracks = Array.isArray(injection?.result) ? injection.result : [];
-        console.info('[SFC transcript] MAIN-world extraction returned', tracks.length, 'tracks for tab', sender.tab.id);
-        return { tracks };
+        const note = `MAIN-world extraction returned ${tracks.length} tracks for tab ${sender.tab.id}`;
+        console.info('[SFC transcript]', note);
+        return { tracks, bgLog: note };
       } catch (err) {
-        console.error('[SFC transcript] chrome.scripting.executeScript failed:', err?.message || err);
-        return { tracks: [] };
+        const note = `chrome.scripting.executeScript failed: ${err?.message || err}`;
+        console.error('[SFC transcript]', note);
+        return { tracks: [], bgLog: note };
       }
     }
 
     // 마지막 폴백 — pot 토큰은 정적 데이터로 존재하지 않으므로, 유튜브 자신의 코드가 캡션을
     // 요청하도록 유도(player API 또는 CC 버튼 클릭)한 뒤 그 실제 네트워크 요청을 가로챈다.
     case 'CAPTURE_REAL_CAPTION': {
-      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab' };
-      if (!chrome.scripting) return { ok: false, reason: 'no_scripting' };
+      if (!sender?.tab?.id) return { triggered: false, bgLog: 'no sender.tab.id' };
+      if (!chrome.scripting) return { triggered: false, bgLog: 'chrome.scripting unavailable' };
       try {
         const [injection] = await chrome.scripting.executeScript({
           target: { tabId: sender.tab.id },
           world: 'MAIN',
-          func: mainWorldCaptureRealCaption,
+          func: mainWorldTriggerCaptionLoad,
           args: [message.videoId || null],
         });
-        return injection?.result || { ok: false, reason: 'no_result' };
+        return injection?.result || { triggered: false, bgLog: 'no_result' };
       } catch (err) {
-        console.error('[SFC transcript][capture] executeScript failed:', err?.message || err);
-        return { ok: false, reason: 'error' };
+        const note = `executeScript failed: ${err?.message || err}`;
+        console.error('[SFC transcript][capture]', note);
+        return { triggered: false, bgLog: note };
       }
     }
 
@@ -291,16 +263,50 @@ async function handle(message, sender) {
 
       const transcript = message.transcript || null;
       if (transcript) {
-        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch(() => null);
-        return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null };
+        let claimErr = null;
+        const videoClaim = await extractVideoClaim(transcript, geminiApiKey).catch((err) => {
+          claimErr = err?.message || String(err);
+          return null;
+        });
+        const bgLog = videoClaim
+          ? 'caption claim extracted ok'
+          : claimErr
+            ? `extractVideoClaim (caption) failed: ${claimErr}`
+            : 'extractVideoClaim (caption) returned no claim';
+        console.info('[SFC transcript]', bgLog);
+        return { videoClaim, transcriptReason: videoClaim ? 'ok' : 'no_claim', claimSource: videoClaim ? 'caption' : null, bgLog };
       }
 
+      // 이 폴백 경로는 여태 실패해도 아무 로그도 안 남아서, 자막도 없고 폴백도 없는 완전
+      // 실패가 실제 오류(키 제한, 쿼터 등) 때문인지 정말 뚜렷한 주장이 없어서인지 구분이
+      // 안 됐다 — 두 실패 지점 모두 이유를 남긴다.
       if (youtubeApiKey) {
-        const meta = await fetchVideoSnippet(message.videoId, youtubeApiKey).catch(() => null);
-        if (meta) {
-          const videoClaim = await extractVideoClaimFromMeta(meta.title, meta.description, geminiApiKey).catch(() => null);
-          if (videoClaim) return { videoClaim, transcriptReason: 'ok', claimSource: 'meta' };
+        let metaErr = null;
+        const meta = await fetchVideoSnippet(message.videoId, youtubeApiKey).catch((err) => {
+          metaErr = err?.message || String(err);
+          return null;
+        });
+        if (metaErr) {
+          const bgLog = `fetchVideoSnippet failed: ${metaErr}`;
+          console.warn('[SFC transcript]', bgLog);
+          return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks', bgLog };
         }
+        if (meta) {
+          let claimErr = null;
+          const videoClaim = await extractVideoClaimFromMeta(meta.title, meta.description, geminiApiKey).catch((err) => {
+            claimErr = err?.message || String(err);
+            return null;
+          });
+          if (videoClaim) return { videoClaim, transcriptReason: 'ok', claimSource: 'meta' };
+          const bgLog = claimErr
+            ? `extractVideoClaimFromMeta failed: ${claimErr}`
+            : `extractVideoClaimFromMeta found no claim in title/description ("${(meta.title || '').slice(0, 60)}")`;
+          console.info('[SFC transcript]', bgLog);
+          return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks', bgLog };
+        }
+        console.warn('[SFC transcript] fetchVideoSnippet returned no meta (no error thrown, but empty)');
+      } else {
+        console.warn('[SFC transcript] no youtubeApiKey, cannot try title/description fallback');
       }
 
       return { videoClaim: null, transcriptReason: message.transcriptReason || 'no_tracks' };

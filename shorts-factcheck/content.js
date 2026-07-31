@@ -632,6 +632,9 @@
   async function fetchTracksFromMainWorld(videoId) {
     try {
       const res = await sendMessage({ type: 'GET_CAPTION_TRACKS', videoId });
+      // background.js(서비스 워커) 콘솔에 찍힌 로그를 페이지 콘솔에도 다시 찍는다 —
+      // 두 콘솔을 오가지 않고 한 곳에서 전체 흐름을 볼 수 있게 하기 위함.
+      if (res?.bgLog) console.info('[SFC transcript][bg]', res.bgLog);
       return Array.isArray(res?.tracks) ? res.tracks : [];
     } catch (err) {
       console.warn('[SFC transcript] GET_CAPTION_TRACKS message failed', err?.message || err);
@@ -670,6 +673,37 @@
       console.warn('[SFC transcript] innertube player call errored', err?.message || err);
       return [];
     }
+  }
+
+  // main-world-hook.js(document_start, MAIN 월드)가 실제 timedtext 응답을 가로채면 document에
+  // 커스텀 이벤트로 던진다. content.js는 격리된 세계라 그 파일과 변수를 공유할 수 없으니 이
+  // 이벤트로만 통신한다. 리스너를 먼저 걸어둔 뒤에 트리거해야, 이벤트가 우리가 듣기 전에
+  // 지나가 버리는 경쟁 상태를 피할 수 있다.
+  function waitForCapturedCaption(videoId, timeoutMs) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer;
+      function onEvent(e) {
+        if (settled || !e.detail || e.detail.videoId !== videoId) return;
+        settled = true;
+        document.removeEventListener('sfc-caption-captured', onEvent);
+        clearTimeout(timer);
+        resolve(e.detail.text || null);
+      }
+      document.addEventListener('sfc-caption-captured', onEvent);
+      timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('sfc-caption-captured', onEvent);
+        resolve(null);
+      }, timeoutMs);
+      // 리스너와 타이머를 다 걸어둔 뒤에야 물어본다 — main-world-hook.js가 이미 버퍼링해둔
+      // 캡처본이 있으면 이 dispatchEvent 호출 안에서 onEvent가 동기적으로 실행되며 즉시
+      // resolve될 수 있는데, 그 시점에 timer가 아직 없으면 clearTimeout(timer)가 깨진다.
+      // 유튜브가 재생 시작과 동시에 캡션을 미리 요청해버려 리스너를 걸기 전에 이미 지나간
+      // 경우를 이렇게 구제한다.
+      document.dispatchEvent(new CustomEvent('sfc-caption-query', { detail: { videoId } }));
+    });
   }
 
   // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
@@ -716,21 +750,26 @@
       }
 
       // 4) 마지막 수단 — pot 토큰은 우리가 만든 어떤 URL에도 실을 수 없으니, 유튜브 자신의
-      // 코드가 캡션을 요청하도록 유도하고 그 실제 요청을 가로챈다. 트랙 자체를 못 찾은
-      // 경우(no_tracks)에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어
-      // 자신은 캡션 데이터를 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
+      // 코드가 캡션을 요청하도록 유도하고 main-world-hook.js(document_start부터 영구적으로
+      // 걸려있는 후킹)가 가로챈 실제 요청을 이벤트로 받는다. 트랙 자체를 못 찾은 경우(no_tracks)
+      // 에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어 자신은 캡션 데이터를
+      // 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
       if (!text) {
         console.info('[SFC transcript][capture] trying real-caption capture as last resort');
+        const capturePromise = waitForCapturedCaption(videoId, 4500);
         try {
-          const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
-          if (captured?.ok && captured.text) {
-            text = parseAnyTranscriptFormat(captured.text);
-            console.info('[SFC transcript][capture] parsed length:', text.length);
-          } else {
-            console.info('[SFC transcript][capture] no usable capture:', captured?.reason);
-          }
+          const triggerRes = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
+          if (triggerRes?.bgLog) console.info('[SFC transcript][bg]', triggerRes.bgLog);
+          console.info('[SFC transcript][capture] trigger result:', triggerRes?.triggered, triggerRes?.method);
         } catch (err) {
-          console.warn('[SFC transcript][capture] message failed', err?.message || err);
+          console.warn('[SFC transcript][capture] trigger message failed', err?.message || err);
+        }
+        const capturedText = await capturePromise;
+        if (capturedText) {
+          text = parseAnyTranscriptFormat(capturedText);
+          console.info('[SFC transcript][capture] parsed length:', text.length);
+        } else {
+          console.info('[SFC transcript][capture] no event captured within timeout');
         }
       }
 
@@ -814,13 +853,19 @@
       return;
     }
     const representative = pickRepresentativeComments(classifyRes.classified);
-    renderCommentsSection(classifyRes.percentages, representative);
+    const isCurrent = () => token === runToken;
+    if (isCurrent()) renderCommentsSection(classifyRes.percentages, representative);
 
     const rebuttalComments = classifyRes.classified.filter((c) => c.category === 'rebuttal');
     currentSourceComments = classifyRes.classified.filter((c) => c.category === 'source').map((c) => c.textOriginal);
 
+    // 자막 캡처(최대 4.5초+)까지 포함하면 여기서 스크롤이 다음 영상으로 넘어가 있는 경우가 흔하다.
+    // 댓글 수집+분류 비용은 이미 지불했으니, 여기서부터는 결과를 버리지 않고 끝까지 계산해서
+    // 캐시에는 반드시 저장한다 — 화면 렌더링만 "지금 보고 있는 영상일 때"로 제한한다. 그래야
+    // 나중에 이 영상으로 다시 스크롤해 돌아왔을 때 처음부터(느린 캡처 단계 포함) 다시 하지 않고
+    // 캐시에서 바로 보여줄 수 있다.
     const videoClaimRes = await videoClaimPromise;
-    if (token !== runToken) return;
+    if (videoClaimRes.bgLog) console.info('[SFC transcript][bg]', videoClaimRes.bgLog);
     const videoClaim = videoClaimRes.videoClaim || null;
     const transcriptReason = videoClaimRes.transcriptReason || null;
     const claimSource = videoClaimRes.claimSource || null;
@@ -828,14 +873,15 @@
     let factchecks = [];
     if (rebuttalComments.length) {
       const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim });
-      if (token !== runToken) return;
       if (fcRes.error) {
-        setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
-        return;
+        if (isCurrent()) {
+          setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
+        }
+        return; // 실패는 캐시하지 않는다 — 다시 시도할 기회를 남겨둔다
       }
       factchecks = fcRes.factchecks || [];
     }
-    renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
+    if (isCurrent()) renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
 
     await sendMessage({
       type: 'SET_CACHE',
