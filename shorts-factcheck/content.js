@@ -506,6 +506,35 @@
     return parts.join(' ').replace(/\s+/g, ' ').trim();
   }
 
+  // 실제 플레이어가 요청하는 자막은 XML이 아니라 json3 포맷({events:[{segs:[{utf8:"..."}]}]})으로
+  // 오는 경우가 많다. 어느 쪽인지 모르니 JSON으로 먼저 시도하고, 아니면 XML로 폴백한다.
+  function parseJson3Transcript(raw) {
+    try {
+      const data = JSON.parse(raw);
+      const events = Array.isArray(data?.events) ? data.events : [];
+      const parts = [];
+      for (const ev of events) {
+        if (!Array.isArray(ev.segs)) continue;
+        for (const seg of ev.segs) {
+          if (seg && seg.utf8) parts.push(seg.utf8);
+        }
+      }
+      return parts.join('').replace(/\n+/g, ' ').replace(/\s+/g, ' ').trim();
+    } catch {
+      return '';
+    }
+  }
+
+  function parseAnyTranscriptFormat(raw) {
+    const trimmed = (raw || '').trim();
+    if (!trimmed) return '';
+    if (trimmed[0] === '{') {
+      const text = parseJson3Transcript(trimmed);
+      if (text) return text;
+    }
+    return parseTranscriptText(trimmed);
+  }
+
   function pickTranscriptTrack(tracks) {
     if (!tracks.length) return null;
     const manual = tracks.filter((t) => !t.kind);
@@ -665,23 +694,48 @@
       }
 
       const track = pickTranscriptTrack(tracks);
-      if (!track || !track.baseUrl) return { text: null, reason: 'no_tracks' };
-      console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
+      let text = null;
+      let noTracksAtAll = !track || !track.baseUrl;
 
-      let text = await fetchOneTrackUrl(track.baseUrl);
+      if (!noTracksAtAll) {
+        console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
+        text = await fetchOneTrackUrl(track.baseUrl);
 
-      // 트랙은 찾았는데 다운로드가 비어 있으면 서명이 이미 만료됐을 가능성이 있다 —
-      // Innertube에서 방금 새로 발급받은 baseUrl로 한 번만 더 시도한다.
-      if (!text && source !== 'innertube') {
-        const freshTracks = await fetchTracksViaInnertube(videoId);
-        const freshTrack = pickTranscriptTrack(freshTracks);
-        if (freshTrack?.baseUrl) {
-          console.info('[SFC transcript] retrying download with fresh innertube baseUrl');
-          text = await fetchOneTrackUrl(freshTrack.baseUrl);
+        // 트랙은 찾았는데 다운로드가 비어 있으면 서명이 이미 만료됐을 가능성이 있다 —
+        // Innertube에서 방금 새로 발급받은 baseUrl로 한 번만 더 시도한다.
+        if (!text && source !== 'innertube') {
+          const freshTracks = await fetchTracksViaInnertube(videoId);
+          const freshTrack = pickTranscriptTrack(freshTracks);
+          if (freshTrack?.baseUrl) {
+            console.info('[SFC transcript] retrying download with fresh innertube baseUrl');
+            text = await fetchOneTrackUrl(freshTrack.baseUrl);
+          }
+        }
+      } else {
+        console.info('[SFC transcript] no track found via any URL-based method');
+      }
+
+      // 4) 마지막 수단 — pot 토큰은 우리가 만든 어떤 URL에도 실을 수 없으니, 유튜브 자신의
+      // 코드가 캡션을 요청하도록 유도하고 그 실제 요청을 가로챈다. 트랙 자체를 못 찾은
+      // 경우(no_tracks)에도 시도할 가치가 있다 — 우리 추출 방식이 못 찾았을 뿐, 플레이어
+      // 자신은 캡션 데이터를 갖고 있을 수 있기 때문이다. 신뢰도가 가장 낮은 경로다.
+      if (!text) {
+        console.info('[SFC transcript][capture] trying real-caption capture as last resort');
+        try {
+          const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION' });
+          if (captured?.ok && captured.text) {
+            text = parseAnyTranscriptFormat(captured.text);
+            console.info('[SFC transcript][capture] parsed length:', text.length);
+          } else {
+            console.info('[SFC transcript][capture] no usable capture:', captured?.reason);
+          }
+        } catch (err) {
+          console.warn('[SFC transcript][capture] message failed', err?.message || err);
         }
       }
 
-      return text ? { text, reason: 'ok' } : { text: null, reason: 'empty_track' };
+      if (text) return { text, reason: 'ok' };
+      return { text: null, reason: noTracksAtAll ? 'no_tracks' : 'empty_track' };
     } catch (err) {
       console.error('[SFC transcript] unexpected error', videoId, err);
       return { text: null, reason: 'error' };

@@ -81,6 +81,98 @@ function mainWorldGetCaptionTracks() {
   }
 }
 
+// 확정된 근본 원인(README 참고)은 BotGuard의 pot 토큰이 정적 스냅샷 어디에도 없고, 유튜브 자신의
+// 스크립트가 캡션을 "실제로 요청하는 순간"에만 즉석으로 만들어진다는 것이다. 남은 방법은 우리가
+// URL을 조립하지 않고, 유튜브 자신의 코드가 그 요청을 쏘도록 유도한 뒤 가로채는 것뿐이다.
+// 신뢰도가 낮다는 걸 명확히 밝힌다 — 아래 셀렉터/플레이어 API 호출은 실제 브라우저 없이 검증할
+// 방법이 없다. 안 되면 [SFC transcript][capture] 로그를 보고 다음 수를 정한다.
+function mainWorldCaptureRealCaption() {
+  return new Promise((resolve) => {
+    const TIMEOUT_MS = 4500;
+    let settled = false;
+    const originalFetch = window.fetch;
+    let timeoutId;
+
+    function finish(result) {
+      if (settled) return;
+      settled = true;
+      window.fetch = originalFetch;
+      clearTimeout(timeoutId);
+      console.log('[SFC transcript][capture] finished:', result.reason || (result.ok ? 'ok' : 'fail'));
+      resolve(result);
+    }
+
+    window.fetch = function (input, init) {
+      const url = typeof input === 'string' ? input : input && input.url;
+      if (url && url.indexOf('/api/timedtext') !== -1) {
+        console.log('[SFC transcript][capture] intercepted timedtext fetch');
+        return originalFetch.call(this, input, init).then((res) => {
+          res
+            .clone()
+            .text()
+            .then((text) => finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' }))
+            .catch(() => finish({ ok: false, reason: 'read_error' }));
+          return res;
+        });
+      }
+      return originalFetch.apply(this, arguments);
+    };
+
+    timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);
+
+    function findPlayerEl() {
+      return (
+        document.querySelector('#movie_player') ||
+        document.querySelector('#shorts-player') ||
+        document.querySelector('ytd-reel-video-renderer[is-active] #player') ||
+        document.querySelector('ytd-reel-video-renderer #player') ||
+        Array.from(document.querySelectorAll('[id*="player"]')).find(
+          (el) => typeof el.loadModule === 'function' || typeof el.setOption === 'function',
+        ) ||
+        null
+      );
+    }
+
+    let triggered = false;
+    try {
+      const player = findPlayerEl();
+      if (player && typeof player.loadModule === 'function') {
+        player.loadModule('captions');
+        triggered = true;
+        console.log('[SFC transcript][capture] called loadModule(captions)');
+      }
+      if (player && typeof player.setOption === 'function') {
+        let track = null;
+        try {
+          const tracklist = typeof player.getOption === 'function' ? player.getOption('captions', 'tracklist') : null;
+          track = Array.isArray(tracklist) && tracklist.length ? tracklist[0] : null;
+        } catch {
+          // getOption 자체가 없거나 실패해도 무시하고 진행
+        }
+        player.setOption('captions', 'track', track || {});
+        triggered = true;
+        console.log('[SFC transcript][capture] called setOption(captions, track, ...)');
+      }
+    } catch (err) {
+      console.log('[SFC transcript][capture] player API call failed:', err && err.message);
+    }
+
+    if (!triggered) {
+      const btn =
+        document.querySelector('.ytp-subtitles-button') ||
+        document.querySelector('button[aria-label*="자막"]') ||
+        document.querySelector('button[aria-label*="caption" i]') ||
+        document.querySelector('button[aria-label*="subtitle" i]');
+      if (btn) {
+        console.log('[SFC transcript][capture] no player API worked, falling back to CC button click');
+        btn.click();
+      } else {
+        console.log('[SFC transcript][capture] no trigger method available (no player API, no CC button found)');
+      }
+    }
+  });
+}
+
 async function handle(message, sender) {
   switch (message.type) {
     case 'OPEN_OPTIONS':
@@ -129,6 +221,24 @@ async function handle(message, sender) {
       } catch (err) {
         console.error('[SFC transcript] chrome.scripting.executeScript failed:', err?.message || err);
         return { tracks: [] };
+      }
+    }
+
+    // 마지막 폴백 — pot 토큰은 정적 데이터로 존재하지 않으므로, 유튜브 자신의 코드가 캡션을
+    // 요청하도록 유도(player API 또는 CC 버튼 클릭)한 뒤 그 실제 네트워크 요청을 가로챈다.
+    case 'CAPTURE_REAL_CAPTION': {
+      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab' };
+      if (!chrome.scripting) return { ok: false, reason: 'no_scripting' };
+      try {
+        const [injection] = await chrome.scripting.executeScript({
+          target: { tabId: sender.tab.id },
+          world: 'MAIN',
+          func: mainWorldCaptureRealCaption,
+        });
+        return injection?.result || { ok: false, reason: 'no_result' };
+      } catch (err) {
+        console.error('[SFC transcript][capture] executeScript failed:', err?.message || err);
+        return { ok: false, reason: 'error' };
       }
     }
 
