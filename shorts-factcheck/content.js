@@ -358,13 +358,19 @@
     // 자막을 "못 받은 것"과 "받았는데 검증할 주장이 없는 것"은 전혀 다른 상황이다.
     // 노래 가사·잡담 위주 영상은 자막이 멀쩡히 있어도 주장이 안 나오는 게 정상 동작이므로,
     // 여기서 "자막을 찾지 못해"라고 하면 사실과 다르고 자막 파이프라인이 고장난 것처럼 보인다.
+    // 논조 요약(extractVideoClaim)과 개별 주장 추출(extractVideoClaims)은 같은 자막을 보는
+    // 별도 호출이라 서로 엇갈릴 수 있다. 요약이 "주장 없음"인데 아래에 검증 결과가 붙으면
+    // 화면이 자기모순이 되므로, 검증 결과가 있거나 아직 오는 중이면 그 문구는 빼버린다.
+    const hasItems = !!(videoFactchecks && videoFactchecks.length);
     const summaryHtml = videoClaim
       ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
-      : transcriptReason === 'no_claim'
-        ? '<p class="sfc-note sfc-video-claim-missing">자막은 받았지만 사실로 따져볼 주장이 없는 영상입니다 (노래 가사·잡담 등).</p>'
-        : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
+      : hasItems || pending
+        ? ''
+        : transcriptReason === 'no_claim'
+          ? '<p class="sfc-note sfc-video-claim-missing">자막은 받았지만 사실로 따져볼 주장이 없는 영상입니다 (노래 가사·잡담 등).</p>'
+          : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
 
-    if ((videoFactchecks && videoFactchecks.length) || pending) {
+    if (hasItems || pending) {
       renderIncremental('videocheck', summaryHtml, videoFactchecks || [], '영상', !!pending);
       return;
     }
