@@ -153,7 +153,11 @@
   // 문제가 아니라 BotGuard가 애초에 못 도는 상황일 수 있어서, 챌린지 관련 요청이 나가긴 하는지
   // /실패하는지를 따로 센다. 광고 차단기나 네트워크 정책이 이 도메인들을 막으면 pot은 영원히
   // 안 생기고, 그건 확장 프로그램 쪽에서 고칠 수 있는 문제가 아니다.
-  const BOTGUARD_HINTS = ['jnn-pa.googleapis.com', '/js/th/', 'googlesyndication.com/bg/', 'google.com/js/bg'];
+  // `pagead2.googlesyndication.com/bg/*.js`는 일부러 뺐다. 이름이 BotGuard라 넣었었는데,
+  // 실측에서 그 스크립트가 ERR_CONNECTION_REFUSED로 계속 차단되는 동안에도 pot은 정상적으로
+  // 발급됐다 — 광고용 BotGuard라 플레이어 pot과는 무관하다. 넣어두면 멀쩡한 세션에서도
+  // "BotGuard가 차단됐다"는 잘못된 경고가 뜬다.
+  const BOTGUARD_HINTS = ['jnn-pa.googleapis.com', '/js/th/', 'google.com/js/bg'];
   let botguardRequestCount = 0;
   let botguardFailureCount = 0;
 

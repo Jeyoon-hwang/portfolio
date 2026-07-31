@@ -355,9 +355,14 @@
     // 자막 다운로드가 막혀 제목/설명으로 대체 추정한 경우, 정확도가 자막보다 낮을 수 있다는
     // 걸 눈에 보이게 표시한다 — 자막에서 나온 것처럼 보이면 안 되기 때문.
     const sourceNote = claimSource === 'meta' ? ' <span class="sfc-video-claim-source">(자막 접근 제한 — 제목/설명 기반 추정)</span>' : '';
+    // 자막을 "못 받은 것"과 "받았는데 검증할 주장이 없는 것"은 전혀 다른 상황이다.
+    // 노래 가사·잡담 위주 영상은 자막이 멀쩡히 있어도 주장이 안 나오는 게 정상 동작이므로,
+    // 여기서 "자막을 찾지 못해"라고 하면 사실과 다르고 자막 파이프라인이 고장난 것처럼 보인다.
     const summaryHtml = videoClaim
       ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
-      : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
+      : transcriptReason === 'no_claim'
+        ? '<p class="sfc-note sfc-video-claim-missing">자막은 받았지만 사실로 따져볼 주장이 없는 영상입니다 (노래 가사·잡담 등).</p>'
+        : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
 
     if ((videoFactchecks && videoFactchecks.length) || pending) {
       renderIncremental('videocheck', summaryHtml, videoFactchecks || [], '영상', !!pending);
@@ -367,6 +372,8 @@
     let note;
     if (videoCheckReason === 'no_claims') {
       note = '자막에서 사실 검증이 가능한 주장을 찾지 못했습니다 (의견·감상 위주의 영상).';
+    } else if (transcriptReason === 'no_claim') {
+      note = null; // 위 요약 문구가 이미 같은 얘기를 하고 있다
     } else if (claimSource === 'meta') {
       note = '자막을 받지 못해 제목/설명으로 논조만 추정했습니다 — 개별 주장 검증은 자막이 있어야 가능합니다.';
     } else if (!videoClaim) {
@@ -374,7 +381,7 @@
     } else {
       note = '영상 주장 검증 결과가 없습니다.';
     }
-    setSectionBody('videocheck', summaryHtml + `<p class="sfc-note">${escapeHtml(note)}</p>`);
+    setSectionBody('videocheck', summaryHtml + (note ? `<p class="sfc-note">${escapeHtml(note)}</p>` : ''));
   }
 
   // 판정이 끝나는 대로 하나씩 덧붙인다. 전체를 다시 그리면 이미 떠 있던 항목까지 등장
