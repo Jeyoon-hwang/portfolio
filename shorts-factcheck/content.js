@@ -904,6 +904,16 @@
         } else {
           console.info('[SFC transcript][capture] no event captured within timeout');
         }
+
+        // 캡처를 기다리는 동안(4.5초) 재생이 진행되면서 pot이 뒤늦게 잡혔을 수 있다.
+        // 이미 쓴 시간이라 추가 대기 없이 물어보기만 하면 되므로 공짜 재시도다.
+        if (!parsed.text && track?.baseUrl) {
+          const late = await requestPotToken(videoId, 0);
+          if (late.pot && late.exact) {
+            console.info('[SFC transcript][pot] pot arrived late — retrying caption download');
+            parsed = await fetchOneTrackUrl(track.baseUrl, late.pot);
+          }
+        }
       }
 
       if (parsed.text) return { text: parsed.text, segments: parsed.segments, reason: 'ok' };

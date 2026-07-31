@@ -74,10 +74,26 @@
     notify(videoId, text);
   }
 
+  // 지금 주소창에 떠 있는 영상. pot이 어느 영상 것인지 요청 자체에 안 적혀 있을 때
+  // (아래 harvestPotFromUrl 참고) 이걸로 대신 짚는다.
+  function currentPageVideoId() {
+    try {
+      const shorts = /^\/shorts\/([\w-]{6,})/.exec(location.pathname);
+      if (shorts) return shorts[1];
+      return new URL(location.href).searchParams.get('v');
+    } catch {
+      return null;
+    }
+  }
+
   function rememberPot(videoId, pot) {
     if (!pot) return;
     latestPot = pot;
-    if (videoId) remember(potByVideoId, videoId, pot);
+    if (videoId) {
+      const isNew = potByVideoId.get(videoId) !== pot;
+      remember(potByVideoId, videoId, pot);
+      if (isNew) console.info('[SFC transcript][pot] collected pot for', videoId);
+    }
     try {
       document.dispatchEvent(new CustomEvent('sfc-pot-captured', { detail: { videoId: videoId || null, pot } }));
     } catch {
@@ -86,11 +102,22 @@
   }
 
   // 나가는 URL에 pot이 이미 박혀 있으면 그대로 주워둔다.
+  //
+  // 이게 특히 중요한 이유: **콜드 페이지 로드에서는 Innertube player 요청 자체가 없다.**
+  // 유튜브가 첫 영상의 player 응답을 HTML(ytInitialPlayerResponse)에 박아서 내려주기 때문에
+  // 가로챌 요청이 아예 안 생긴다. 그래서 첫 영상은 재생이 시작되며 나가는 `videoplayback`
+  // (GVS) 요청에 실린 pot이 사실상 유일한 확보 경로다.
+  //
+  // 그런데 videoplayback URL은 영상 식별자를 `v`가 아니라 `id`(내부 docid)로 달고 나와서
+  // videoId로 바로 매핑되지 않는다 — 예전엔 그래서 videoId 없이 저장돼 "이 영상 것"으로
+  // 인정받지 못했다. 지금은 주소창의 videoId로 대신 짚는다. 쇼츠가 다음 영상을 미리 로드하는
+  // 특성상 옆 영상 pot을 현재 영상 것으로 잘못 붙일 수 있지만, 틀린 pot이면 어차피 본문이
+  // 비어서 돌아오고 다음 단계로 넘어갈 뿐이라 안 하는 것보단 낫다.
   function harvestPotFromUrl(url) {
     try {
       const parsed = new URL(url, location.href);
       const pot = parsed.searchParams.get('pot');
-      if (pot) rememberPot(parsed.searchParams.get('v'), pot);
+      if (pot) rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot);
     } catch {
       // URL 파싱 실패는 무시
     }
