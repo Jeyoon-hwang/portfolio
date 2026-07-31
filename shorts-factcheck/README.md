@@ -102,6 +102,12 @@ content.js는 `sfc-pot-query` 이벤트로 이 값을 받아와, `exp=xpe`가 �
 `pot`/`potc=1`/`c=WEB`을 붙여 보낸다. 이건 CC 버튼 클릭처럼 타이밍에 기대는 방식이 아니라 결정론적이다 —
 페이지가 그 영상을 재생하는 이상 pot은 반드시 존재하기 때문이다.
 
+**실측 결과 (2026-07): 롱폼·쇼츠 모두 동작 확인.** 쇼츠를 연속으로 넘기며 테스트했을 때 첫 1~2개를
+제외한 나머지 전부가 `exact match for this video` → `caption download succeeded WITH pot token`으로
+자막을 정상 수신했다. **유일하게 남은 실패 케이스는 콜드 로드 직후의 첫 영상**인데, 이건 아래 설명대로
+그 시점엔 가로챌 Innertube 요청이 아예 없기 때문이다(HTML에 박혀 내려온다). 스크롤을 시작하는 순간부터는
+계속 pot이 확보되므로, 첫 영상만 캡처/메타 폴백으로 처리된다.
+
 **쇼츠는 player가 아니라 reel 엔드포인트를 쓴다.** 처음엔 `/youtubei/v1/player` 본문의
 `serviceIntegrityDimensions.poToken`만 고정 경로로 읽었는데, 실측 결과 롱폼은 잘 되는데 **쇼츠에서는
 pot이 단 한 번도 안 잡혔다**(`pot token: NOT available`). 쇼츠는 `/youtubei/v1/reel/reel_item_watch`

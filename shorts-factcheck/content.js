@@ -816,6 +816,30 @@
   // 자막 한 트랙을 pot까지 붙여서 받아온다. xpe/xpv가 붙어 있으면 pot 없이는 어차피 빈
   // 본문이므로 먼저 pot을 구해 한 번에 제대로 요청하고, 신호를 못 봤는데 결과가 비면
   // 그때 pot을 구해 한 번 더 시도한다.
+  // pot을 못 구했을 때만 MAIN 월드가 실제로 뭘 봤는지 받아 찍는다. 원인이 "콜드 로드라
+  // Innertube 요청 자체가 없었음"인지 "요청은 봤는데 pot이 안 들어있었음"인지 구분하려는 것.
+  function logPotDiagnostics() {
+    const onResult = (e) => {
+      document.removeEventListener('sfc-pot-debug-result', onResult);
+      const d = e.detail || {};
+      console.info(
+        '[SFC transcript][pot] 진단 — innertube 요청:',
+        d.innertubePaths?.length ? d.innertubePaths.join(', ') : '(하나도 못 봄)',
+        '| pot 수집: URL',
+        d.potFromUrlCount,
+        '/ 본문',
+        d.potFromBodyCount,
+        '| 본문 못 읽음:',
+        d.bodyUnreadableCount,
+        '| pot 보유 영상:',
+        d.videoIdsWithPot?.length || 0,
+      );
+    };
+    document.addEventListener('sfc-pot-debug-result', onResult);
+    document.dispatchEvent(new CustomEvent('sfc-pot-debug-query'));
+    setTimeout(() => document.removeEventListener('sfc-pot-debug-result', onResult), 1000);
+  }
+
   async function fetchTrackWithPot(baseUrl, videoId) {
     let pot = null;
     if (requiresPotToken(baseUrl)) {
@@ -825,6 +849,7 @@
         '[SFC transcript][pot] xpe/xpv detected — pot token:',
         !pot ? 'NOT available' : res.exact ? 'exact match for this video' : 'STALE (다른 영상 pot — 실패 예상)',
       );
+      if (!pot) logPotDiagnostics();
     }
 
     let parsed = await fetchOneTrackUrl(baseUrl, pot);

@@ -117,7 +117,10 @@
     try {
       const parsed = new URL(url, location.href);
       const pot = parsed.searchParams.get('pot');
-      if (pot) rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot);
+      if (pot) {
+        potFromUrlCount++;
+        rememberPot(parsed.searchParams.get('v') || currentPageVideoId(), pot);
+      }
     } catch {
       // URL 파싱 실패는 무시
     }
@@ -138,6 +141,44 @@
     return null;
   }
 
+  // ---------- 진단용 ----------
+  // 쇼츠에서 pot이 왜 안 잡히는지 추측만 반복하지 않으려고, 우리가 실제로 무엇을 봤는지 센다.
+  // pot을 못 구했을 때 content.js가 이 값을 받아 콘솔에 찍는다.
+  const seenInnertubePaths = new Map(); // path -> { total, withPot }
+  let potFromUrlCount = 0;
+  let potFromBodyCount = 0;
+  let bodyUnreadableCount = 0;
+
+  function notePath(url, hadPot) {
+    try {
+      const path = new URL(url, location.href).pathname;
+      const entry = seenInnertubePaths.get(path) || { total: 0, withPot: 0 };
+      entry.total++;
+      if (hadPot) entry.withPot++;
+      seenInnertubePaths.set(path, entry);
+    } catch {
+      // 무시
+    }
+  }
+
+  // 요청 본문이 항상 문자열인 건 아니다(Blob/ArrayBuffer/URLSearchParams로 보내는 경우가 있다).
+  // 예전엔 문자열이 아니면 그냥 건너뛰어서, 그런 방식으로 나간 Innertube 요청은 pot이 실려
+  // 있어도 통째로 놓치고 있었다.
+  function readBodyText(body) {
+    try {
+      if (typeof body === 'string') return Promise.resolve(body);
+      if (typeof Blob !== 'undefined' && body instanceof Blob) return body.text().catch(() => null);
+      if (body instanceof ArrayBuffer) return Promise.resolve(new TextDecoder().decode(body));
+      if (ArrayBuffer.isView(body)) return Promise.resolve(new TextDecoder().decode(body));
+      if (typeof URLSearchParams !== 'undefined' && body instanceof URLSearchParams) {
+        return Promise.resolve(body.toString());
+      }
+    } catch {
+      // 아래에서 null 반환
+    }
+    return Promise.resolve(null);
+  }
+
   // Innertube 요청 본문에서 poToken을 뽑는다.
   //
   // 처음엔 `/youtubei/v1/player` 본문의 `serviceIntegrityDimensions.poToken`만 고정 경로로
@@ -146,16 +187,34 @@
   // 같은 다른 엔드포인트로 플레이어 데이터를 받아오기 때문이다. 그래서 경로를 `/youtubei/`
   // 전체로 넓히고, 본문 구조도 고정 경로 대신 재귀 탐색으로 바꿨다 — 엔드포인트마다 poToken과
   // videoId가 박히는 위치가 달라서다.
-  function harvestPotFromBody(bodyText) {
+  function harvestPotFromBody(bodyText, url) {
     // 대부분의 Innertube 요청엔 poToken이 없다. JSON 파싱 전에 문자열로 먼저 걸러 비용을 아낀다.
-    if (!bodyText || bodyText.indexOf('poToken') === -1) return;
+    if (!bodyText || bodyText.indexOf('poToken') === -1) {
+      notePath(url, false);
+      return;
+    }
     try {
       const body = JSON.parse(bodyText);
       const pot = findStringValue(body, 'poToken', 0);
-      if (pot) rememberPot(findStringValue(body, 'videoId', 0), pot);
+      notePath(url, !!pot);
+      if (pot) {
+        potFromBodyCount++;
+        rememberPot(findStringValue(body, 'videoId', 0) || currentPageVideoId(), pot);
+      }
     } catch {
-      // JSON이 아니거나 형식이 다르면 무시
+      notePath(url, false);
     }
+  }
+
+  function harvestPotFromRequestBody(body, url) {
+    readBodyText(body).then((text) => {
+      if (text === null) {
+        bodyUnreadableCount++;
+        notePath(url, false);
+        return;
+      }
+      harvestPotFromBody(text, url);
+    });
   }
 
   function isInnertubeRequest(url) {
@@ -184,6 +243,31 @@
     }
   });
 
+  // pot을 못 구했을 때 content.js가 "뭘 봤는지" 물어본다. 실측으로 확인된 유일한 실패 케이스는
+  // 콜드 로드 첫 영상인데(그땐 Innertube player 요청 자체가 없다), 나중에 다른 원인이 생기면
+  // 이 값으로 바로 구분할 수 있다.
+  document.addEventListener('sfc-pot-debug-query', () => {
+    const paths = [];
+    for (const [path, entry] of seenInnertubePaths) {
+      paths.push(`${path} x${entry.total}${entry.withPot ? ` (pot ${entry.withPot})` : ''}`);
+    }
+    try {
+      document.dispatchEvent(
+        new CustomEvent('sfc-pot-debug-result', {
+          detail: {
+            innertubePaths: paths,
+            potFromUrlCount,
+            potFromBodyCount,
+            bodyUnreadableCount,
+            videoIdsWithPot: Array.from(potByVideoId.keys()),
+          },
+        }),
+      );
+    } catch {
+      // 무시
+    }
+  });
+
   const originalFetch = window.fetch;
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : input && input.url;
@@ -191,20 +275,27 @@
     if (url) {
       harvestPotFromUrl(url);
       if (isInnertubeRequest(url)) {
-        // 본문은 init.body(문자열)이거나 Request 객체 안에 있다. 어느 쪽이든 원본 요청을
-        // 건드리지 않도록 복제해서 비동기로 읽는다 — 실패해도 요청 자체엔 영향이 없다.
+        // 본문은 init.body(문자열/Blob/ArrayBuffer 등)이거나 Request 객체 안에 있다.
+        // 어느 쪽이든 원본 요청을 건드리지 않도록 복제해서 비동기로 읽는다 — 실패해도
+        // 요청 자체엔 영향이 없다.
         try {
-          if (init && typeof init.body === 'string') {
-            harvestPotFromBody(init.body);
+          if (init && init.body != null) {
+            harvestPotFromRequestBody(init.body, url);
           } else if (input && typeof input !== 'string' && typeof input.clone === 'function') {
             input
               .clone()
               .text()
-              .then(harvestPotFromBody)
-              .catch(() => {});
+              .then((text) => harvestPotFromBody(text, url))
+              .catch(() => {
+                bodyUnreadableCount++;
+                notePath(url, false);
+              });
+          } else {
+            notePath(url, false);
           }
         } catch {
-          // 본문 읽기 실패는 무시
+          bodyUnreadableCount++;
+          notePath(url, false);
         }
       }
     }
@@ -230,12 +321,16 @@
   OriginalXHR.prototype.open = function (method, url, ...rest) {
     this.__sfcTimedtextUrl = typeof url === 'string' && url.indexOf('/api/timedtext') !== -1 ? url : null;
     this.__sfcIsInnertube = isInnertubeRequest(url);
+    this.__sfcInnertubeUrl = this.__sfcIsInnertube ? url : null;
     if (typeof url === 'string') harvestPotFromUrl(url);
     return originalOpen.call(this, method, url, ...rest);
   };
 
   OriginalXHR.prototype.send = function (...args) {
-    if (this.__sfcIsInnertube && typeof args[0] === 'string') harvestPotFromBody(args[0]);
+    if (this.__sfcIsInnertube) {
+      if (args[0] != null) harvestPotFromRequestBody(args[0], this.__sfcInnertubeUrl);
+      else notePath(this.__sfcInnertubeUrl, false);
+    }
     if (this.__sfcTimedtextUrl) {
       const videoId = extractVideoId(this.__sfcTimedtextUrl);
       this.addEventListener('load', () => onCaptured(videoId, this.responseText));
