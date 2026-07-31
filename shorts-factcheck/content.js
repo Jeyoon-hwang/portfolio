@@ -167,8 +167,12 @@
         <div class="sfc-section-header"><span>댓글 여론</span><button class="sfc-toggle" type="button">▾</button></div>
         <div class="sfc-section-body"><div class="sfc-skeleton"></div></div>
       </div>
+      <div class="sfc-section" data-section="videocheck">
+        <div class="sfc-section-header"><span>영상 주장 검증</span><button class="sfc-toggle" type="button">▾</button></div>
+        <div class="sfc-section-body"><div class="sfc-skeleton"></div></div>
+      </div>
       <div class="sfc-section" data-section="factcheck">
-        <div class="sfc-section-header"><span>팩트체크</span><button class="sfc-toggle" type="button">▾</button></div>
+        <div class="sfc-section-header"><span>반박 댓글 팩트체크</span><button class="sfc-toggle" type="button">▾</button></div>
         <div class="sfc-section-body"><div class="sfc-skeleton"></div></div>
       </div>
       <div class="sfc-section" data-section="original">
@@ -292,22 +296,10 @@
     no_claim: '자막은 확인했지만 뚜렷한 주장 없음(가사/잡담 등)',
   };
 
-  function renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource) {
-    const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
-      ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
-      : '';
-    // 자막 다운로드가 막혀 제목/설명으로 대체 추정한 경우, 정확도가 자막보다 낮을 수 있다는
-    // 걸 눈에 보이게 표시한다 — 자막에서 나온 것처럼 보이면 안 되기 때문.
-    const sourceNote = claimSource === 'meta' ? ' <span class="sfc-video-claim-source">(자막 접근 제한 — 제목/설명 기반 추정)</span>' : '';
-    const videoClaimHtml = videoClaim
-      ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
-      : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 자체 주장은 파악하지 못했습니다${escapeHtml(reasonSuffix)}. 아래는 반박 댓글 주장만 독립적으로 검증한 결과입니다.</p>`;
-
-    if (!factchecks || !factchecks.length) {
-      setSectionBody('factcheck', videoClaimHtml + '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
-      return;
-    }
-    const html = factchecks
+  // 영상 주장 검증과 반박 댓글 팩트체크는 판정 결과 모양이 같아서 항목 렌더링을 공유한다.
+  // label만 "영상"/"반박"으로 달라진다.
+  function renderVerdictItems(items, label) {
+    return items
       .map((fc) => {
         const sources = (fc.sources || [])
           // 출처 title이 없으면 리다이렉트 URL 원문 대신 짧은 대체 라벨을 보여준다
@@ -315,14 +307,52 @@
           .join(' · ');
         return `
           <div class="sfc-factcheck-item">
-            <div class="sfc-fc-verdict">${VERDICT_ICON[fc.verdict] || '⚠️'} 반박: "${escapeHtml(fc.claim)}" → ${escapeHtml(fc.verdict)}</div>
+            <div class="sfc-fc-verdict">${VERDICT_ICON[fc.verdict] || '⚠️'} ${label}: "${escapeHtml(fc.claim)}" → ${escapeHtml(fc.verdict)}</div>
             <div class="sfc-fc-reason">${escapeHtml(fc.reason || '')}</div>
             ${sources ? `<div class="sfc-fc-sources">${sources}</div>` : ''}
           </div>
         `;
       })
       .join('');
-    setSectionBody('factcheck', videoClaimHtml + html);
+  }
+
+  // 영상이 스스로 한 말이 맞는지를 보여주는 섹션. 댓글이 뭐라고 하든 무관하게 독립적으로
+  // 판정한 결과라, 반박 댓글 섹션과 분리해서 맨 위에 둔다.
+  function renderVideoCheckSection(videoFactchecks, videoClaim, transcriptReason, claimSource, videoCheckReason) {
+    const reasonSuffix = !videoClaim && transcriptReason && transcriptReason !== 'ok'
+      ? ` (${TRANSCRIPT_REASON_LABEL[transcriptReason] || transcriptReason})`
+      : '';
+    // 자막 다운로드가 막혀 제목/설명으로 대체 추정한 경우, 정확도가 자막보다 낮을 수 있다는
+    // 걸 눈에 보이게 표시한다 — 자막에서 나온 것처럼 보이면 안 되기 때문.
+    const sourceNote = claimSource === 'meta' ? ' <span class="sfc-video-claim-source">(자막 접근 제한 — 제목/설명 기반 추정)</span>' : '';
+    const summaryHtml = videoClaim
+      ? `<div class="sfc-video-claim"><strong>영상 주장</strong>${sourceNote} ${escapeHtml(videoClaim)}</div>`
+      : `<p class="sfc-note sfc-video-claim-missing">영상 자막을 찾지 못해 영상 주장을 파악하지 못했습니다${escapeHtml(reasonSuffix)}.</p>`;
+
+    if (videoFactchecks && videoFactchecks.length) {
+      setSectionBody('videocheck', summaryHtml + renderVerdictItems(videoFactchecks, '영상'));
+      return;
+    }
+
+    let note;
+    if (videoCheckReason === 'no_claims') {
+      note = '자막에서 사실 검증이 가능한 주장을 찾지 못했습니다 (의견·감상 위주의 영상).';
+    } else if (claimSource === 'meta') {
+      note = '자막을 받지 못해 제목/설명으로 논조만 추정했습니다 — 개별 주장 검증은 자막이 있어야 가능합니다.';
+    } else if (!videoClaim) {
+      note = '자막이 없어 영상 주장을 검증할 수 없습니다.';
+    } else {
+      note = '영상 주장 검증 결과가 없습니다.';
+    }
+    setSectionBody('videocheck', summaryHtml + `<p class="sfc-note">${escapeHtml(note)}</p>`);
+  }
+
+  function renderFactcheckSection(factchecks) {
+    if (!factchecks || !factchecks.length) {
+      setSectionBody('factcheck', '<p class="sfc-note">반박 댓글에서 검증 가능한 주장을 찾지 못했습니다.</p>');
+      return;
+    }
+    setSectionBody('factcheck', renderVerdictItems(factchecks, '반박'));
   }
 
   function showOriginalMessage(msg) {
@@ -748,30 +778,37 @@
 
   // main-world-hook.js가 페이지 자신의 요청에서 주워둔 pot을 받아온다. 이미 갖고 있으면
   // 즉시(동기적으로) 답이 오고, 아직이면 새 pot이 잡힐 때까지 timeoutMs만큼 기다린다.
+  // pot은 videoId에 바인딩된 값이라 **다른 영상의 pot은 절대 통하지 않는다**(실측: 직전
+  // 영상의 pot을 그대로 붙였더니 pot을 붙였는데도 본문이 0바이트로 왔다). 그래서 이 영상의
+  // pot이 확실할 때(exact)만 바로 쓰고, 아직 없으면 타임아웃까지 기다렸다가 그때도 없으면
+  // 마지막에나 남의 pot이라도 한 번 시도해본다(어차피 실패해도 다음 단계로 넘어갈 뿐이다).
   function requestPotToken(videoId, timeoutMs) {
     return new Promise((resolve) => {
       let settled = false;
       let timer;
-      function finish(pot) {
+      let staleFallback = null;
+      function finish(pot, exact) {
         if (settled) return;
         settled = true;
         document.removeEventListener('sfc-pot-result', onResult);
         document.removeEventListener('sfc-pot-captured', onCaptured);
         clearTimeout(timer);
-        resolve(pot || null);
+        resolve({ pot: pot || null, exact: !!exact });
       }
       function onResult(e) {
-        if (e.detail && e.detail.pot) finish(e.detail.pot);
+        if (!e.detail || !e.detail.pot) return;
+        if (e.detail.exact) finish(e.detail.pot, true);
+        else staleFallback = e.detail.pot; // 아직 확정 못 함 — 계속 기다린다
       }
-      // 아직 없다고 답이 온 뒤에도, 대기 중에 새로 잡히면 그걸 쓴다.
+      // 대기 중에 이 영상의 pot이 새로 잡히면 그 즉시 쓴다.
       function onCaptured(e) {
         if (!e.detail || !e.detail.pot) return;
-        if (e.detail.videoId && videoId && e.detail.videoId !== videoId) return;
-        finish(e.detail.pot);
+        if (e.detail.videoId && videoId && e.detail.videoId === videoId) finish(e.detail.pot, true);
+        else if (!e.detail.videoId) staleFallback = staleFallback || e.detail.pot;
       }
       document.addEventListener('sfc-pot-result', onResult);
       document.addEventListener('sfc-pot-captured', onCaptured);
-      timer = setTimeout(() => finish(null), timeoutMs);
+      timer = setTimeout(() => finish(staleFallback, false), timeoutMs);
       document.dispatchEvent(new CustomEvent('sfc-pot-query', { detail: { videoId } }));
     });
   }
@@ -782,16 +819,20 @@
   async function fetchTrackWithPot(baseUrl, videoId) {
     let pot = null;
     if (requiresPotToken(baseUrl)) {
-      pot = await requestPotToken(videoId, 2500);
-      console.info('[SFC transcript][pot] xpe/xpv detected — pot token:', pot ? 'acquired' : 'NOT available');
+      const res = await requestPotToken(videoId, 2500);
+      pot = res.pot;
+      console.info(
+        '[SFC transcript][pot] xpe/xpv detected — pot token:',
+        !pot ? 'NOT available' : res.exact ? 'exact match for this video' : 'STALE (다른 영상 pot — 실패 예상)',
+      );
     }
 
     let parsed = await fetchOneTrackUrl(baseUrl, pot);
     if (!parsed.text && !pot) {
-      pot = await requestPotToken(videoId, 2500);
-      if (pot) {
-        console.info('[SFC transcript][pot] retrying empty response with pot token');
-        parsed = await fetchOneTrackUrl(baseUrl, pot);
+      const res = await requestPotToken(videoId, 2500);
+      if (res.pot) {
+        console.info('[SFC transcript][pot] retrying empty response with pot token (exact:', res.exact, ')');
+        parsed = await fetchOneTrackUrl(baseUrl, res.pot);
       }
     }
     if (parsed.text && pot) console.info('[SFC transcript][pot] caption download succeeded WITH pot token');
@@ -883,6 +924,7 @@
     if (missing.length) {
       const labelMap = { youtube: 'YouTube', gemini: 'Gemini' };
       setSectionBody('comments', missingKeyHtml(missing.map((k) => labelMap[k])));
+      setSectionBody('videocheck', '<p class="sfc-note">API 키를 먼저 설정하세요.</p>');
       setSectionBody('factcheck', '<p class="sfc-note">API 키를 먼저 설정하세요.</p>');
       return;
     }
@@ -891,7 +933,14 @@
     if (token !== runToken) return;
     if (cached && cached.percentages) {
       renderCommentsSection(cached.percentages, cached.representative || null);
-      renderFactcheckSection(cached.factchecks || [], cached.videoClaim || null, cached.transcriptReason || null, cached.claimSource || null);
+      renderVideoCheckSection(
+        cached.videoFactchecks || [],
+        cached.videoClaim || null,
+        cached.transcriptReason || null,
+        cached.claimSource || null,
+        cached.videoCheckReason || null,
+      );
+      renderFactcheckSection(cached.factchecks || []);
       currentSourceComments = cached.sourceComments || [];
       if (cached.originalSearch) renderOriginalResult(cached.originalSearch);
       return;
@@ -905,40 +954,72 @@
     // 판정에 넣어줄 수 있도록, FACTCHECK_COMMENTS를 부를 때 같이 넘길 수 있게 바깥 스코프에
     // 잡아둔다 — videoClaimPromise 체인 안에서 fetchTranscript의 결과를 소비하며 채워진다.
     let transcriptSegments = [];
+    let transcriptText = null;
     const videoClaimPromise = fetchTranscript(videoId)
       .catch(() => ({ text: null, segments: [], reason: 'error' }))
       .then(({ text, segments, reason }) => {
         transcriptSegments = segments || [];
+        transcriptText = text || null;
         return sendMessage({ type: 'GET_VIDEO_CLAIM', videoId, transcript: text, transcriptReason: reason }).catch(() => ({
           videoClaim: null,
           transcriptReason: reason,
         }));
       });
 
+    // 영상 주장 검증은 댓글과 완전히 독립적이다 — 댓글이 꺼져 있거나 수집에 실패해도
+    // 자막만 있으면 계속 진행한다. 그래서 아래 조기 반환 경로들에서도 이걸 먼저 렌더한다.
+    const videoCheckPromise = videoClaimPromise.then((claimRes) => {
+      if (!transcriptText) return { videoFactchecks: [], reason: 'no_transcript' };
+      return sendMessage({
+        type: 'FACTCHECK_VIDEO',
+        transcript: transcriptText,
+        videoClaim: claimRes.videoClaim || null,
+      }).catch(() => ({ videoFactchecks: [], reason: 'error' }));
+    });
+
+    async function renderVideoCheckNow() {
+      const claimRes = await videoClaimPromise;
+      const vcRes = await videoCheckPromise;
+      if (token === runToken) {
+        renderVideoCheckSection(
+          vcRes.videoFactchecks || [],
+          claimRes.videoClaim || null,
+          claimRes.transcriptReason || null,
+          claimRes.claimSource || null,
+          vcRes.reason,
+        );
+      }
+      return { claimRes, vcRes };
+    }
+
     const commentsRes = await commentsPromise;
     if (token !== runToken) return;
 
     if (commentsRes.error === 'comments_disabled') {
       setSectionBody('comments', '<p class="sfc-note">댓글이 꺼진 영상입니다.</p>');
-      setSectionBody('factcheck', '<p class="sfc-note">댓글이 없어 팩트체크를 진행할 수 없습니다. 원본 찾기는 계속 사용할 수 있습니다.</p>');
+      setSectionBody('factcheck', '<p class="sfc-note">댓글이 없어 반박 댓글 팩트체크는 진행할 수 없습니다. 영상 주장 검증과 원본 찾기는 계속 사용할 수 있습니다.</p>');
+      await renderVideoCheckNow();
       return;
     }
     if (commentsRes.error === 'quota_exceeded') {
       setSectionBody('comments', '<p class="sfc-note">YouTube API 일일 한도를 초과했습니다. 캐시된 결과만 표시됩니다.</p>');
       setSectionBody('factcheck', '<p class="sfc-note">일일 한도 초과로 진행할 수 없습니다.</p>');
+      await renderVideoCheckNow();
       return;
     }
     if (commentsRes.error) {
       // 'missing_key'나 예상 못 한 예외(예: API 키 제한 설정 문제)를 "댓글 0개"로 오인하지 않도록 별도 처리
       setSectionBody('comments', `<p class="sfc-note">댓글을 불러오지 못했습니다: ${escapeHtml(commentsRes.message || commentsRes.error)}</p>`);
       setSectionBody('factcheck', '<p class="sfc-note">댓글을 불러오지 못해 팩트체크를 진행할 수 없습니다.</p>');
+      await renderVideoCheckNow();
       return;
     }
 
     const comments = commentsRes.comments || [];
     if (!comments.length) {
       setSectionBody('comments', '<p class="sfc-note">댓글이 없습니다.</p>');
-      setSectionBody('factcheck', '<p class="sfc-note">댓글이 없어 팩트체크를 진행할 수 없습니다.</p>');
+      setSectionBody('factcheck', '<p class="sfc-note">댓글이 없어 반박 댓글 팩트체크는 진행할 수 없습니다.</p>');
+      await renderVideoCheckNow();
       return;
     }
 
@@ -947,6 +1028,7 @@
     if (classifyRes.error) {
       setSectionBody('comments', `<p class="sfc-note">댓글 분류에 실패했습니다: ${escapeHtml(classifyRes.message || classifyRes.error)}</p>`);
       setSectionBody('factcheck', '<p class="sfc-note">댓글 분류 실패로 팩트체크를 진행할 수 없습니다.</p>');
+      await renderVideoCheckNow();
       return;
     }
     const representative = pickRepresentativeComments(classifyRes.classified);
@@ -967,18 +1049,33 @@
     const transcriptReason = videoClaimRes.transcriptReason || null;
     const claimSource = videoClaimRes.claimSource || null;
 
-    let factchecks = [];
-    if (rebuttalComments.length) {
-      const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim, transcriptSegments });
-      if (fcRes.error) {
-        if (isCurrent()) {
-          setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
-        }
-        return; // 실패는 캐시하지 않는다 — 다시 시도할 기회를 남겨둔다
-      }
-      factchecks = fcRes.factchecks || [];
+    // 영상 주장 검증과 반박 댓글 팩트체크는 서로 독립적이라 동시에 돌린다 — 둘 다 웹서치가
+    // 붙은 느린 호출이라 순차로 하면 대기 시간이 그대로 두 배가 된다.
+    const [videoCheck, fcRes] = await Promise.all([
+      videoCheckPromise,
+      rebuttalComments.length
+        ? sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim, transcriptSegments })
+        : Promise.resolve({ factchecks: [] }),
+    ]);
+
+    if (isCurrent()) {
+      renderVideoCheckSection(
+        videoCheck.videoFactchecks || [],
+        videoClaim,
+        transcriptReason,
+        claimSource,
+        videoCheck.reason,
+      );
     }
-    if (isCurrent()) renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
+
+    if (fcRes.error) {
+      if (isCurrent()) {
+        setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
+      }
+      return; // 실패는 캐시하지 않는다 — 다시 시도할 기회를 남겨둔다
+    }
+    const factchecks = fcRes.factchecks || [];
+    if (isCurrent()) renderFactcheckSection(factchecks);
 
     await sendMessage({
       type: 'SET_CACHE',
@@ -988,6 +1085,8 @@
         distribution: classifyRes.distribution,
         representative,
         factchecks,
+        videoFactchecks: videoCheck.videoFactchecks || [],
+        videoCheckReason: videoCheck.reason || null,
         videoClaim,
         transcriptReason,
         claimSource,

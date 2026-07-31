@@ -5,8 +5,10 @@ import { classifyComments } from './lib/classifier.js';
 import {
   extractClaim,
   extractVideoClaim,
+  extractVideoClaims,
   extractVideoClaimFromMeta,
   verifyClaim,
+  verifyVideoClaim,
   findTimestampSeconds,
   buildTimestampContext,
 } from './lib/factcheck.js';
@@ -15,6 +17,9 @@ import { getCache, setCache } from './lib/cache.js';
 
 const KEY_NAMES = ['youtubeApiKey', 'geminiApiKey', 'visionApiKey'];
 const MAX_FACTCHECK_TARGETS = 5;
+// 영상 주장 검증도 반박 댓글과 같은 웹서치 판정(Gemini Pro)을 쓰므로 영상 1건당 비용이
+// 대략 2배가 된다. 영상 주장이 이 도구의 핵심이라 켜두되, 개수는 따로 조절할 수 있게 둔다.
+const MAX_VIDEO_CLAIM_TARGETS = 5;
 
 chrome.action.onClicked.addListener(() => {
   chrome.runtime.openOptionsPage();
@@ -331,6 +336,14 @@ async function handle(message, sender) {
       return await factcheckComments(message.comments, geminiApiKey, message.videoClaim || null, message.transcriptSegments || []);
     }
 
+    // 영상 자막에서 검증 가능한 주장들을 뽑아 각각 웹서치로 판정한다 — 반박 댓글이 뭐라
+    // 하든 상관없이 "영상 자체가 맞는 말을 하고 있는지"를 독립적으로 따지는 경로다.
+    case 'FACTCHECK_VIDEO': {
+      const { geminiApiKey } = await getKeys();
+      if (!geminiApiKey) return { error: 'missing_key' };
+      return await factcheckVideoClaims(message.transcript, geminiApiKey, message.videoClaim || null);
+    }
+
     case 'FIND_ORIGINAL': {
       const { visionApiKey, youtubeApiKey } = await getKeys();
       const result = await findOriginal(
@@ -346,6 +359,23 @@ async function handle(message, sender) {
     default:
       throw new Error('Unknown message type: ' + message.type);
   }
+}
+
+// 영상 자막 → 검증 가능한 주장 여러 개 → 각각 웹서치 판정. 판정 호출이 가장 느리므로
+// 댓글 쪽과 마찬가지로 병렬로 돌려 "가장 느린 1건"의 시간만 들게 한다.
+async function factcheckVideoClaims(transcript, geminiApiKey, videoClaim) {
+  if (!transcript) return { videoFactchecks: [], reason: 'no_transcript' };
+
+  const claims = await extractVideoClaims(transcript, geminiApiKey, MAX_VIDEO_CLAIM_TARGETS);
+  if (!claims.length) return { videoFactchecks: [], reason: 'no_claims' };
+
+  const results = await Promise.all(
+    claims.map(async (claim) => {
+      const verdict = await verifyVideoClaim(claim, geminiApiKey, videoClaim);
+      return { claim, ...verdict };
+    }),
+  );
+  return { videoFactchecks: results, reason: 'ok' };
 }
 
 // 좋아요 상위 5개 반박 댓글에서만 주장을 추출/검증한다 (비용 폭증 방지).

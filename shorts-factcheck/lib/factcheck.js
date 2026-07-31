@@ -27,6 +27,29 @@ const VIDEO_CLAIM_SYSTEM_PROMPT = `너는 유튜브 쇼츠 자막에서 영상�
 없으면: {"has_claim":false}
 마크다운 코드블록이나 백틱 없이 JSON 객체만 출력하라.`;
 
+// 영상 자막에서 검증 가능한 사실 주장 여러 개를 뽑는다. 자막이 없으면 빈 배열.
+export async function extractVideoClaims(transcript, apiKey, maxClaims) {
+  if (!transcript) return [];
+  const systemPrompt = VIDEO_CLAIMS_SYSTEM_PROMPT.replace('%MAX%', String(maxClaims));
+  const userPrompt = `자막: ${transcript.slice(0, 20000)}`;
+
+  let parsed = null;
+  for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
+    try {
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, systemPrompt, userPrompt, apiKey);
+      if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
+    } catch {
+      // 재시도
+    }
+  }
+
+  if (!parsed || !Array.isArray(parsed.claims)) return [];
+  return parsed.claims
+    .filter((c) => typeof c === 'string' && c.trim())
+    .map((c) => c.trim())
+    .slice(0, maxClaims);
+}
+
 // 자막을 못 가져왔을 때(유튜브 자동생성 자막 다운로드가 봇 방지 조치에 막히는 경우가 잦다)의
 // 대체 재료. 제목/설명은 자막보다 정보가 적어 부정확할 수 있음을 프롬프트에 명시한다.
 const VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT = `너는 유튜브 쇼츠의 제목과 설명만 보고 영상이 시청자에게 전달하려는 핵심 주장이나 논조를 한두 문장으로 요약하는 도구다.
@@ -36,6 +59,38 @@ const VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT = `너는 유튜브 쇼츠의 제목�
 주장이 있으면: {"has_claim":true,"claim":"영상의 핵심 주장을 한두 문장으로"}
 없으면: {"has_claim":false}
 마크다운 코드블록이나 백틱 없이 JSON 객체만 출력하라.`;
+
+// 영상 "논조 한 줄 요약"(VIDEO_CLAIM_SYSTEM_PROMPT)과 달리, 이건 실제로 웹 검색으로
+// 맞는지 틀린지 따져볼 수 있는 개별 사실 주장들을 뽑아내는 용도다. 의견·감상·예측처럼
+// 검증 불가능한 문장은 걸러야 헛된 판정(전부 "불충분")이 안 나온다.
+const VIDEO_CLAIMS_SYSTEM_PROMPT = `너는 유튜브 영상 자막에서 "사실인지 검증 가능한 주장"만 골라내는 도구다.
+
+검증 가능한 주장이란 통계·수치, 역사적 사실, 특정 사건의 발생 여부, 인물·기관의 구체적 행위,
+법·제도의 내용처럼 공개된 자료로 맞고 틀림을 따질 수 있는 문장이다.
+다음은 제외하라: 개인 의견·감상("나는 ~라고 생각한다"), 미래 예측, 가치 판단("~해야 한다"),
+농담·과장 표현, 너무 모호해서 무엇을 확인해야 할지 알 수 없는 문장.
+
+각 주장은 자막의 표현을 그대로 베끼지 말고, 그 자체만 읽어도 무엇을 확인해야 하는지 알 수 있게
+구체적으로 다시 써라 (예: "실업률이 엄청 높아요" → "남아프리카 공화국의 실업률은 30%를 넘는다").
+지시 대명사("그 사건", "이 나라")는 자막 맥락을 참고해 실제 대상으로 바꿔라.
+
+중요도(영상의 논지를 떠받치는 핵심일수록 앞)순으로 최대 %MAX% 개까지만 뽑아라.
+검증 가능한 주장이 하나도 없으면 빈 배열을 출력하라.
+
+출력은 반드시 JSON 객체 하나만 출력하라: {"claims":["주장1","주장2"]}
+마크다운 코드블록이나 백틱 없이 JSON 객체만 출력하라.`;
+
+const VERIFY_VIDEO_CLAIM_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 유튜브 영상이 시청자에게 말한 주장 하나가 주어진다.
+그 주장이 실제로 맞는지 웹 검색 결과에 근거해 판정하라.
+
+판정 등급은 다음 4개 중 하나만 사용한다: "사실", "거짓", "불충분", "부분적 사실".
+영상이 말했다는 이유로 맞다고 전제하지 마라 — 오히려 이 도구의 목적은 영상의 오정보를 잡는 것이다.
+주장의 큰 줄기는 맞는데 수치나 범위가 과장·축소됐다면 "부분적 사실"로 판정하고 무엇이 다른지 밝혀라.
+근거가 부족하거나 검색 결과가 상충하면 억지로 사실/거짓으로 밀어붙이지 말고 반드시 "불충분"으로 판정하라.
+
+충분히 검색한 뒤, 최종 답변으로 다른 설명 없이 아래 JSON 형식 하나만 마지막에 출력하라.
+마크다운 코드블록이나 백틱은 쓰지 마라.
+{"verdict":"사실|거짓|불충분|부분적 사실","reason":"판정 근거를 한두 문장으로 요약","sources":["https://...", "https://..."]}`;
 
 const VERIFY_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 유튜브 쇼츠의 핵심 주장과, 그 영상에 달린 반박 댓글의 주장이 함께 주어질 수 있다
 (영상 자막이 없어 영상 주장이 주어지지 않으면 반박 댓글 주장만 보고 판정하라).
@@ -164,8 +219,20 @@ export async function verifyClaim(claim, apiKey, videoClaim, timestampContext) {
   if (videoClaim) lines.push(`영상 주장: ${videoClaim}`);
   if (timestampContext) lines.push(`댓글이 지칭하는 시점의 영상 자막: ${timestampContext.slice(0, 1000)}`);
   lines.push(`반박 댓글 주장: ${claim}`);
-  const userText = lines.join('\n');
-  const data = await callGemini(GEMINI_PRO_MODEL, VERIFY_SYSTEM_PROMPT, userText, apiKey, [{ googleSearch: {} }]);
+  return runVerification(VERIFY_SYSTEM_PROMPT, lines.join('\n'), apiKey);
+}
+
+// 영상 자체가 말하는 주장을 검증한다. 반박 댓글 검증과 판정 등급·출력 형식은 같지만,
+// "댓글이 맞는지"가 아니라 "영상이 맞는지"를 묻는 것이라 프롬프트를 따로 둔다.
+export async function verifyVideoClaim(claim, apiKey, videoSummary) {
+  const lines = [];
+  if (videoSummary) lines.push(`영상 전체 논조(맥락 참고용): ${videoSummary}`);
+  lines.push(`영상이 말한 주장: ${claim}`);
+  return runVerification(VERIFY_VIDEO_CLAIM_SYSTEM_PROMPT, lines.join('\n'), apiKey);
+}
+
+async function runVerification(systemPrompt, userText, apiKey) {
+  const data = await callGemini(GEMINI_PRO_MODEL, systemPrompt, userText, apiKey, [{ googleSearch: {} }]);
 
   if (isGeminiBlocked(data)) {
     return { verdict: '불충분', reason: '정책상 이 주장은 판정할 수 없습니다.', sources: [] };
