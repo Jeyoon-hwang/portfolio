@@ -629,9 +629,9 @@
   // 직접 읽어온다. 이렇게 얻은 baseUrl은 브라우저가 실제로 그 영상을 재생하며 player.js가
   // 만들어낸 것이라 서명/토큰이 완전하다 — 우리가 별도로 watch 페이지를 다시 fetch해서
   // 파싱한 것보다 훨씬 신뢰할 수 있다.
-  async function fetchTracksFromMainWorld() {
+  async function fetchTracksFromMainWorld(videoId) {
     try {
-      const res = await sendMessage({ type: 'GET_CAPTION_TRACKS' });
+      const res = await sendMessage({ type: 'GET_CAPTION_TRACKS', videoId });
       return Array.isArray(res?.tracks) ? res.tracks : [];
     } catch (err) {
       console.warn('[SFC transcript] GET_CAPTION_TRACKS message failed', err?.message || err);
@@ -677,7 +677,7 @@
   async function fetchTranscript(videoId) {
     try {
       // 1) 메인 월드에서 라이브 페이지 상태 직접 읽기
-      let tracks = await fetchTracksFromMainWorld();
+      let tracks = await fetchTracksFromMainWorld(videoId);
       let source = 'mainWorld';
       console.info('[SFC transcript] mainWorld tracks:', tracks.length);
       // 2) watch 페이지를 다시 fetch해 정적 HTML에서 파싱 (SPA 전환 직후라 아직 갱신 안 된 경우 등의 폴백)
@@ -722,7 +722,7 @@
       if (!text) {
         console.info('[SFC transcript][capture] trying real-caption capture as last resort');
         try {
-          const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION' });
+          const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
           if (captured?.ok && captured.text) {
             text = parseAnyTranscriptFormat(captured.text);
             console.info('[SFC transcript][capture] parsed length:', text.length);
