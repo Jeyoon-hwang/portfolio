@@ -100,12 +100,34 @@ function mainWorldCaptureRealCaption(expectedVideoId) {
     const TIMEOUT_MS = 4500;
     let settled = false;
     const originalFetch = window.fetch;
+    const OriginalXHR = window.XMLHttpRequest;
+    const originalXhrOpen = OriginalXHR.prototype.open;
+    const originalXhrSend = OriginalXHR.prototype.send;
     let timeoutId;
+
+    function isTargetTimedtextUrl(url) {
+      if (!url || url.indexOf('/api/timedtext') === -1) return false;
+      let requestVideoId = null;
+      try {
+        requestVideoId = new URL(url, location.href).searchParams.get('v');
+      } catch {
+        // URL 파싱 실패 시 검증 없이 진행
+      }
+      // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 가로챈 요청이 지금 보고 있는 영상 것이
+      // 맞는지 v= 파라미터로 확인한다 — 아니면 무시하고 계속 기다린다.
+      if (expectedVideoId && requestVideoId && requestVideoId !== expectedVideoId) {
+        console.log('[SFC transcript][capture] ignoring timedtext request for a different video', requestVideoId);
+        return false;
+      }
+      return true;
+    }
 
     function finish(result) {
       if (settled) return;
       settled = true;
       window.fetch = originalFetch;
+      OriginalXHR.prototype.open = originalXhrOpen;
+      OriginalXHR.prototype.send = originalXhrSend;
       clearTimeout(timeoutId);
       console.log('[SFC transcript][capture] finished:', result.reason || (result.ok ? 'ok' : 'fail'));
       resolve(result);
@@ -113,19 +135,7 @@ function mainWorldCaptureRealCaption(expectedVideoId) {
 
     window.fetch = function (input, init) {
       const url = typeof input === 'string' ? input : input && input.url;
-      if (url && url.indexOf('/api/timedtext') !== -1) {
-        // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 가로챈 요청이 지금 보고 있는 영상 것이
-        // 맞는지 v= 파라미터로 확인한다 — 아니면 무시하고 계속 기다린다.
-        let requestVideoId = null;
-        try {
-          requestVideoId = new URL(url, location.href).searchParams.get('v');
-        } catch {
-          // URL 파싱 실패 시 검증 없이 진행
-        }
-        if (expectedVideoId && requestVideoId && requestVideoId !== expectedVideoId) {
-          console.log('[SFC transcript][capture] ignoring timedtext fetch for a different video', requestVideoId);
-          return originalFetch.apply(this, arguments);
-        }
+      if (isTargetTimedtextUrl(url)) {
         console.log('[SFC transcript][capture] intercepted timedtext fetch');
         return originalFetch.call(this, input, init).then((res) => {
           res
@@ -137,6 +147,24 @@ function mainWorldCaptureRealCaption(expectedVideoId) {
         });
       }
       return originalFetch.apply(this, arguments);
+    };
+
+    // 실제 플레이어의 자막 요청이 fetch가 아니라 XMLHttpRequest로 나가는 경우를 대비한다 —
+    // 실측 결과 loadModule/setOption 호출까지는 성공했는데도 fetch 후킹엔 아무것도 안 잡혔다.
+    OriginalXHR.prototype.open = function (method, url, ...rest) {
+      this.__sfcTimedtextTarget = isTargetTimedtextUrl(url);
+      return originalXhrOpen.call(this, method, url, ...rest);
+    };
+    OriginalXHR.prototype.send = function (...args) {
+      if (this.__sfcTimedtextTarget) {
+        console.log('[SFC transcript][capture] intercepted timedtext XHR');
+        this.addEventListener('load', () => {
+          const text = this.responseText;
+          finish({ ok: !!text, text, reason: text ? 'ok' : 'empty' });
+        });
+        this.addEventListener('error', () => finish({ ok: false, reason: 'xhr_error' }));
+      }
+      return originalXhrSend.apply(this, args);
     };
 
     timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);

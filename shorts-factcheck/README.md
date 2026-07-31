@@ -73,10 +73,12 @@ Token) 파라미터가 요청에 없어서다. `pot`은 정적 데이터가 아�
 
 **4번째(최후) 수단으로 캡처 방식을 추가했다.** 유튜브 자신의 코드가 캡션을 요청하게 유도한 뒤(플레이어
 API `loadModule('captions')`/`setOption('captions', 'track', ...)` 우선 시도, 안 먹히면 CC 버튼 클릭
-폴백) 그 실제 네트워크 요청(`window.fetch` 후킹)을 가로챈다 — 이건 유튜브 자신의 코드가 만든 요청이라
-pot이 정상적으로 실려있을 것이라는 전제다. `background.js`의 `mainWorldCaptureRealCaption()` +
-content.js `fetchTranscript()`의 4단계로 구현되어 있고, 콘솔에 `[SFC transcript][capture]` 태그로
-각 단계를 찍는다.
+폴백) 그 실제 네트워크 요청을 가로챈다 — 이건 유튜브 자신의 코드가 만든 요청이라 pot이 정상적으로
+실려있을 것이라는 전제다. `background.js`의 `mainWorldCaptureRealCaption()` + content.js
+`fetchTranscript()`의 4단계로 구현되어 있고, 콘솔에 `[SFC transcript][capture]` 태그로 각 단계를 찍는다.
+`window.fetch`와 `XMLHttpRequest.prototype.open/send` 둘 다 후킹한다 — 실측 결과 `loadModule`/
+`setOption` 호출까지는 성공해도 fetch 후킹엔 아무것도 안 잡히는 경우가 있었는데, 실제 플레이어의
+자막 요청이 fetch가 아니라 XHR로 나가고 있었을 가능성이 높다.
 
 **단, 이건 명백히 신뢰도가 낮은 실험적 경로임을 밝힌다:**
 1. 쇼츠의 CC 버튼/플레이어 컨테이너 셀렉터를 실제 브라우저 없이 확신할 수 없다(롱폼의
