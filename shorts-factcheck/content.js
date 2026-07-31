@@ -632,6 +632,9 @@
   async function fetchTracksFromMainWorld(videoId) {
     try {
       const res = await sendMessage({ type: 'GET_CAPTION_TRACKS', videoId });
+      // background.js(서비스 워커) 콘솔에 찍힌 로그를 페이지 콘솔에도 다시 찍는다 —
+      // 두 콘솔을 오가지 않고 한 곳에서 전체 흐름을 볼 수 있게 하기 위함.
+      if (res?.bgLog) console.info('[SFC transcript][bg]', res.bgLog);
       return Array.isArray(res?.tracks) ? res.tracks : [];
     } catch (err) {
       console.warn('[SFC transcript] GET_CAPTION_TRACKS message failed', err?.message || err);
@@ -723,6 +726,7 @@
         console.info('[SFC transcript][capture] trying real-caption capture as last resort');
         try {
           const captured = await sendMessage({ type: 'CAPTURE_REAL_CAPTION', videoId });
+          if (captured?.bgLog) console.info('[SFC transcript][bg]', captured.bgLog);
           if (captured?.ok && captured.text) {
             text = parseAnyTranscriptFormat(captured.text);
             console.info('[SFC transcript][capture] parsed length:', text.length);

@@ -233,14 +233,17 @@ async function handle(message, sender) {
       return await fetchComments(message.videoId, youtubeApiKey);
     }
 
+    // 이 케이스와 CAPTURE_REAL_CAPTION의 console.warn/error는 서비스 워커 콘솔에만 찍혀서
+    // content.js가 있는 페이지 콘솔과 분리돼 있다 — 디버깅할 때 두 콘솔을 오가야 해서 계속
+    // 혼선이 있었다. 그래서 로그를 응답에도 담아 content.js가 자기 콘솔에 다시 찍게 한다.
     case 'GET_CAPTION_TRACKS': {
       if (!sender?.tab?.id) {
         console.warn('[SFC transcript] GET_CAPTION_TRACKS: no sender.tab.id, cannot inject into MAIN world');
-        return { tracks: [] };
+        return { tracks: [], bgLog: 'no sender.tab.id, cannot inject into MAIN world' };
       }
       if (!chrome.scripting) {
         console.error('[SFC transcript] chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension in chrome://extensions.');
-        return { tracks: [] };
+        return { tracks: [], bgLog: 'chrome.scripting unavailable — "scripting" permission not granted yet? reload the extension.' };
       }
       try {
         const [injection] = await chrome.scripting.executeScript({
@@ -250,19 +253,21 @@ async function handle(message, sender) {
           args: [message.videoId || null],
         });
         const tracks = Array.isArray(injection?.result) ? injection.result : [];
-        console.info('[SFC transcript] MAIN-world extraction returned', tracks.length, 'tracks for tab', sender.tab.id);
-        return { tracks };
+        const note = `MAIN-world extraction returned ${tracks.length} tracks for tab ${sender.tab.id}`;
+        console.info('[SFC transcript]', note);
+        return { tracks, bgLog: note };
       } catch (err) {
-        console.error('[SFC transcript] chrome.scripting.executeScript failed:', err?.message || err);
-        return { tracks: [] };
+        const note = `chrome.scripting.executeScript failed: ${err?.message || err}`;
+        console.error('[SFC transcript]', note);
+        return { tracks: [], bgLog: note };
       }
     }
 
     // 마지막 폴백 — pot 토큰은 정적 데이터로 존재하지 않으므로, 유튜브 자신의 코드가 캡션을
     // 요청하도록 유도(player API 또는 CC 버튼 클릭)한 뒤 그 실제 네트워크 요청을 가로챈다.
     case 'CAPTURE_REAL_CAPTION': {
-      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab' };
-      if (!chrome.scripting) return { ok: false, reason: 'no_scripting' };
+      if (!sender?.tab?.id) return { ok: false, reason: 'no_tab', bgLog: 'no sender.tab.id' };
+      if (!chrome.scripting) return { ok: false, reason: 'no_scripting', bgLog: 'chrome.scripting unavailable' };
       try {
         const [injection] = await chrome.scripting.executeScript({
           target: { tabId: sender.tab.id },
@@ -272,8 +277,9 @@ async function handle(message, sender) {
         });
         return injection?.result || { ok: false, reason: 'no_result' };
       } catch (err) {
-        console.error('[SFC transcript][capture] executeScript failed:', err?.message || err);
-        return { ok: false, reason: 'error' };
+        const note = `executeScript failed: ${err?.message || err}`;
+        console.error('[SFC transcript][capture]', note);
+        return { ok: false, reason: 'error', bgLog: note };
       }
     }
 
