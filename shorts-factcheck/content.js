@@ -846,13 +846,18 @@
       return;
     }
     const representative = pickRepresentativeComments(classifyRes.classified);
-    renderCommentsSection(classifyRes.percentages, representative);
+    const isCurrent = () => token === runToken;
+    if (isCurrent()) renderCommentsSection(classifyRes.percentages, representative);
 
     const rebuttalComments = classifyRes.classified.filter((c) => c.category === 'rebuttal');
     currentSourceComments = classifyRes.classified.filter((c) => c.category === 'source').map((c) => c.textOriginal);
 
+    // 자막 캡처(최대 4.5초+)까지 포함하면 여기서 스크롤이 다음 영상으로 넘어가 있는 경우가 흔하다.
+    // 댓글 수집+분류 비용은 이미 지불했으니, 여기서부터는 결과를 버리지 않고 끝까지 계산해서
+    // 캐시에는 반드시 저장한다 — 화면 렌더링만 "지금 보고 있는 영상일 때"로 제한한다. 그래야
+    // 나중에 이 영상으로 다시 스크롤해 돌아왔을 때 처음부터(느린 캡처 단계 포함) 다시 하지 않고
+    // 캐시에서 바로 보여줄 수 있다.
     const videoClaimRes = await videoClaimPromise;
-    if (token !== runToken) return;
     const videoClaim = videoClaimRes.videoClaim || null;
     const transcriptReason = videoClaimRes.transcriptReason || null;
     const claimSource = videoClaimRes.claimSource || null;
@@ -860,14 +865,15 @@
     let factchecks = [];
     if (rebuttalComments.length) {
       const fcRes = await sendMessage({ type: 'FACTCHECK_COMMENTS', comments: rebuttalComments, videoClaim });
-      if (token !== runToken) return;
       if (fcRes.error) {
-        setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
-        return;
+        if (isCurrent()) {
+          setSectionBody('factcheck', `<p class="sfc-note">팩트체크에 실패했습니다: ${escapeHtml(fcRes.message || fcRes.error)}</p>`);
+        }
+        return; // 실패는 캐시하지 않는다 — 다시 시도할 기회를 남겨둔다
       }
       factchecks = fcRes.factchecks || [];
     }
-    renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
+    if (isCurrent()) renderFactcheckSection(factchecks, videoClaim, transcriptReason, claimSource);
 
     await sendMessage({
       type: 'SET_CACHE',
