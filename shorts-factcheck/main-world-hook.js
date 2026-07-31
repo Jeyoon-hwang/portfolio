@@ -8,8 +8,12 @@
 // 보이지 않는다. document_start에 심어두면 유튜브 자신의 스크립트가 원본 참조를 캐싱하기도
 // 전에 우리 패치가 먼저 자리를 잡으므로 이 문제를 원천적으로 피할 수 있다.
 //
+// 이 후킹은 두 가지를 수집한다:
+//   1. 캡션(timedtext) 응답 본문 — 유튜브 자신이 쏜 진짜 요청을 가로채는 최후 수단용
+//   2. pot(Proof of Origin Token) — 아래 참고. 자막을 "정공법으로" 받아오는 핵심 재료다.
+//
 // 이 파일은 MAIN 월드에서 실행되므로 content.js(격리된 세계)와 변수를 공유할 수 없다.
-// 대신 캡션 응답을 잡을 때마다 document에 커스텀 이벤트를 던지고, content.js가 그걸 듣는다.
+// 대신 수집할 때마다 document에 커스텀 이벤트를 던지고, content.js가 그걸 듣는다.
 (function () {
   'use strict';
 
@@ -31,13 +35,30 @@
   const MAX_BUFFERED = 20;
   const captured = new Map();
 
-  function remember(videoId, text) {
-    if (!videoId) return;
-    captured.delete(videoId);
-    captured.set(videoId, text);
-    if (captured.size > MAX_BUFFERED) {
-      captured.delete(captured.keys().next().value);
-    }
+  // ---------- pot(Proof of Origin Token) 수집 ----------
+  //
+  // 자막 baseUrl에 `exp=xpe`(또는 xpv)가 붙어 있으면 유튜브는 `pot` 없이 온 요청에
+  // 200 OK + 0바이트 본문을 돌려준다. pot은 BotGuard가 런타임에 만들어내는 값이라
+  // 페이지 정적 데이터(ytInitialPlayerResponse 등)에는 없지만, **페이지 자신이 보내는
+  // 요청에는 들어있다.** 두 군데서 확보한다:
+  //
+  //   1. `/youtubei/v1/player` 요청 본문의 serviceIntegrityDimensions.poToken
+  //      — videoId에 바인딩된 값이고, 자막(subs)용 pot도 player와 동일한 바인딩을 쓴다.
+  //        (yt-dlp가 자막 지원을 넣을 때 SUBS를 PLAYER와 같은 VIDEO_ID 바인딩으로 처리했다)
+  //   2. 이미 pot이 박혀 나가는 URL(page가 쏜 timedtext 등)에서 그대로 뽑기
+  //
+  // 이 토큰을 자막 baseUrl에 `pot`, `potc=1`, `c=WEB`으로 덧붙이면 실제 브라우저가 보내는
+  // 요청과 같아져 정상 본문을 받는다. baseUrl의 서명(signature)은 `sparams`에 나열된
+  // 파라미터에만 걸려 있어서, 목록에 없는 pot/potc/c를 "추가"하는 건 서명을 깨지 않는다
+  // (기존 파라미터를 지우거나 바꾸면 깨진다 — 그건 여전히 금지).
+  const potByVideoId = new Map();
+  let latestPot = null;
+
+  function remember(map, key, value) {
+    if (!key) return;
+    map.delete(key);
+    map.set(key, value);
+    if (map.size > MAX_BUFFERED) map.delete(map.keys().next().value);
   }
 
   function notify(videoId, text) {
@@ -49,8 +70,46 @@
   }
 
   function onCaptured(videoId, text) {
-    remember(videoId, text);
+    remember(captured, videoId, text);
     notify(videoId, text);
+  }
+
+  function rememberPot(videoId, pot) {
+    if (!pot) return;
+    latestPot = pot;
+    if (videoId) remember(potByVideoId, videoId, pot);
+    try {
+      document.dispatchEvent(new CustomEvent('sfc-pot-captured', { detail: { videoId: videoId || null, pot } }));
+    } catch {
+      // 무시 (극초기 타이밍)
+    }
+  }
+
+  // 나가는 URL에 pot이 이미 박혀 있으면 그대로 주워둔다.
+  function harvestPotFromUrl(url) {
+    try {
+      const parsed = new URL(url, location.href);
+      const pot = parsed.searchParams.get('pot');
+      if (pot) rememberPot(parsed.searchParams.get('v'), pot);
+    } catch {
+      // URL 파싱 실패는 무시
+    }
+  }
+
+  // /youtubei/v1/player 요청 본문에서 poToken을 뽑는다. 본문은 JSON이고
+  // { videoId, context: { ... }, serviceIntegrityDimensions: { poToken } } 형태다.
+  function harvestPotFromPlayerBody(bodyText) {
+    try {
+      const body = JSON.parse(bodyText);
+      const pot = body?.serviceIntegrityDimensions?.poToken;
+      if (pot) rememberPot(body?.videoId || null, pot);
+    } catch {
+      // JSON이 아니거나 형식이 다르면 무시
+    }
+  }
+
+  function isPlayerRequest(url) {
+    return typeof url === 'string' && url.indexOf('/youtubei/v1/player') !== -1;
   }
 
   document.addEventListener('sfc-caption-query', (e) => {
@@ -58,9 +117,48 @@
     if (videoId && captured.has(videoId)) notify(videoId, captured.get(videoId));
   });
 
+  // content.js가 "이 영상 pot 있어?"라고 물으면 답한다. videoId에 딱 맞는 게 없으면
+  // 최근에 본 pot이라도 준다 — 첫 로딩 영상처럼 player 요청을 우리가 못 본 경우가 있어서다.
+  // 어차피 틀린 pot이면 본문이 비어서 돌아오니 시도해볼 가치는 있다.
+  document.addEventListener('sfc-pot-query', (e) => {
+    const videoId = e.detail && e.detail.videoId;
+    const exact = videoId ? potByVideoId.get(videoId) || null : null;
+    try {
+      document.dispatchEvent(
+        new CustomEvent('sfc-pot-result', {
+          detail: { videoId: videoId || null, pot: exact || latestPot || null, exact: !!exact },
+        }),
+      );
+    } catch {
+      // 무시
+    }
+  });
+
   const originalFetch = window.fetch;
   window.fetch = function (input, init) {
     const url = typeof input === 'string' ? input : input && input.url;
+
+    if (url) {
+      harvestPotFromUrl(url);
+      if (isPlayerRequest(url)) {
+        // 본문은 init.body(문자열)이거나 Request 객체 안에 있다. 어느 쪽이든 원본 요청을
+        // 건드리지 않도록 복제해서 비동기로 읽는다 — 실패해도 요청 자체엔 영향이 없다.
+        try {
+          if (init && typeof init.body === 'string') {
+            harvestPotFromPlayerBody(init.body);
+          } else if (input && typeof input !== 'string' && typeof input.clone === 'function') {
+            input
+              .clone()
+              .text()
+              .then(harvestPotFromPlayerBody)
+              .catch(() => {});
+          }
+        } catch {
+          // 본문 읽기 실패는 무시
+        }
+      }
+    }
+
     if (url && url.indexOf('/api/timedtext') !== -1) {
       const videoId = extractVideoId(url);
       return originalFetch.call(this, input, init).then((res) => {
@@ -81,10 +179,13 @@
 
   OriginalXHR.prototype.open = function (method, url, ...rest) {
     this.__sfcTimedtextUrl = typeof url === 'string' && url.indexOf('/api/timedtext') !== -1 ? url : null;
+    this.__sfcIsPlayer = isPlayerRequest(url);
+    if (typeof url === 'string') harvestPotFromUrl(url);
     return originalOpen.call(this, method, url, ...rest);
   };
 
   OriginalXHR.prototype.send = function (...args) {
+    if (this.__sfcIsPlayer && typeof args[0] === 'string') harvestPotFromPlayerBody(args[0]);
     if (this.__sfcTimedtextUrl) {
       const videoId = extractVideoId(this.__sfcTimedtextUrl);
       this.addEventListener('load', () => onCaptured(videoId, this.responseText));

@@ -626,16 +626,40 @@
   // baseUrl은 페이지의 player.js가 이미 서명/토큰까지 계산해 완성해둔 URL이다.
   // 쿼리 파라미터를 하나라도 건드리면(순서 변경, 삭제 등) 서명 검증에 걸려 200 OK인데
   // 본문만 빈 채로 오므로, 절대 수정하지 않고 그대로 fetch한다.
-  async function fetchOneTrackUrl(url) {
-    const res = await fetch(url);
+  // baseUrl에 `exp=xpe`(또는 xpv)가 있으면 pot 없이는 200 OK + 0바이트가 온다.
+  // 이 실험 플래그가 자막 pot 요구의 확정 신호다.
+  function requiresPotToken(url) {
+    const exp = /[?&]exp=([^&]*)/.exec(url || '');
+    if (!exp) return false;
+    return /\bxpe\b/.test(exp[1]) || /\bxpv\b/.test(exp[1]);
+  }
+
+  // pot/potc/c를 "추가"만 한다. baseUrl의 서명은 sparams에 나열된 파라미터에만 걸려
+  // 있으므로 목록에 없는 값을 덧붙이는 건 서명을 깨지 않는다 — 실제 브라우저가 보내는
+  // 요청도 서명과 pot을 함께 달고 나간다. (기존 파라미터 수정/삭제는 여전히 금지)
+  // URL 객체로 다시 조립하면 기존 값이 재인코딩된다(예: sparams의 쉼표 → %2C). 서명이
+  // 걸린 URL을 그렇게 건드리는 건 위험하므로, 원본 문자열은 한 글자도 손대지 않고 뒤에
+  // 문자열로만 이어 붙인다.
+  function appendPotParams(url, pot) {
+    let extra = `pot=${encodeURIComponent(pot)}&potc=1`;
+    if (!/[?&]c=/.test(url)) extra += '&c=WEB';
+    return url + (url.indexOf('?') === -1 ? '?' : '&') + extra;
+  }
+
+  async function fetchOneTrackUrl(url, pot) {
+    const finalUrl = pot ? appendPotParams(url, pot) : url;
+    const res = await fetch(finalUrl);
     if (!res.ok) {
-      console.warn('[SFC transcript] track fetch not ok', url, res.status);
+      console.warn('[SFC transcript] track fetch not ok', finalUrl, res.status);
       return { text: '', segments: [] };
     }
     const raw = await res.text();
     const parsed = parseTranscriptText(raw);
     if (!parsed.text) {
-      console.warn('[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ')', url);
+      console.warn(
+        '[SFC transcript] track fetch ok but parsed empty (raw body length: ' + raw.length + ', pot: ' + (pot ? 'yes' : 'no') + ')',
+        finalUrl,
+      );
     }
     return parsed;
   }
@@ -722,6 +746,58 @@
     });
   }
 
+  // main-world-hook.js가 페이지 자신의 요청에서 주워둔 pot을 받아온다. 이미 갖고 있으면
+  // 즉시(동기적으로) 답이 오고, 아직이면 새 pot이 잡힐 때까지 timeoutMs만큼 기다린다.
+  function requestPotToken(videoId, timeoutMs) {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer;
+      function finish(pot) {
+        if (settled) return;
+        settled = true;
+        document.removeEventListener('sfc-pot-result', onResult);
+        document.removeEventListener('sfc-pot-captured', onCaptured);
+        clearTimeout(timer);
+        resolve(pot || null);
+      }
+      function onResult(e) {
+        if (e.detail && e.detail.pot) finish(e.detail.pot);
+      }
+      // 아직 없다고 답이 온 뒤에도, 대기 중에 새로 잡히면 그걸 쓴다.
+      function onCaptured(e) {
+        if (!e.detail || !e.detail.pot) return;
+        if (e.detail.videoId && videoId && e.detail.videoId !== videoId) return;
+        finish(e.detail.pot);
+      }
+      document.addEventListener('sfc-pot-result', onResult);
+      document.addEventListener('sfc-pot-captured', onCaptured);
+      timer = setTimeout(() => finish(null), timeoutMs);
+      document.dispatchEvent(new CustomEvent('sfc-pot-query', { detail: { videoId } }));
+    });
+  }
+
+  // 자막 한 트랙을 pot까지 붙여서 받아온다. xpe/xpv가 붙어 있으면 pot 없이는 어차피 빈
+  // 본문이므로 먼저 pot을 구해 한 번에 제대로 요청하고, 신호를 못 봤는데 결과가 비면
+  // 그때 pot을 구해 한 번 더 시도한다.
+  async function fetchTrackWithPot(baseUrl, videoId) {
+    let pot = null;
+    if (requiresPotToken(baseUrl)) {
+      pot = await requestPotToken(videoId, 2500);
+      console.info('[SFC transcript][pot] xpe/xpv detected — pot token:', pot ? 'acquired' : 'NOT available');
+    }
+
+    let parsed = await fetchOneTrackUrl(baseUrl, pot);
+    if (!parsed.text && !pot) {
+      pot = await requestPotToken(videoId, 2500);
+      if (pot) {
+        console.info('[SFC transcript][pot] retrying empty response with pot token');
+        parsed = await fetchOneTrackUrl(baseUrl, pot);
+      }
+    }
+    if (parsed.text && pot) console.info('[SFC transcript][pot] caption download succeeded WITH pot token');
+    return parsed;
+  }
+
   // reason은 자막을 못 가져왔을 때 UI/콘솔에서 "어느 단계에서 실패했는지" 바로 알 수 있게 하는 진단용 값이다.
   // 'no_tracks' | 'empty_track' | 'error' | 'ok'
   async function fetchTranscript(videoId) {
@@ -749,7 +825,7 @@
 
       if (!noTracksAtAll) {
         console.info('[SFC transcript] using track from', source, '—', track.baseUrl.slice(0, 120));
-        parsed = await fetchOneTrackUrl(track.baseUrl);
+        parsed = await fetchTrackWithPot(track.baseUrl, videoId);
 
         // 트랙은 찾았는데 다운로드가 비어 있으면 서명이 이미 만료됐을 가능성이 있다 —
         // Innertube에서 방금 새로 발급받은 baseUrl로 한 번만 더 시도한다.
@@ -758,7 +834,7 @@
           const freshTrack = pickTranscriptTrack(freshTracks);
           if (freshTrack?.baseUrl) {
             console.info('[SFC transcript] retrying download with fresh innertube baseUrl');
-            parsed = await fetchOneTrackUrl(freshTrack.baseUrl);
+            parsed = await fetchTrackWithPot(freshTrack.baseUrl, videoId);
           }
         }
       } else {
