@@ -34,8 +34,16 @@ async function getKeys() {
 // 트랙을 못 찾았다 — 쇼츠는 세로 피드로 영상이 넘어갈 때 SPA 전환이라 이 전역이 갱신되지 않고,
 // 플레이어 컨테이너 자체도 다른 구조를 쓰는 것으로 보인다. 정확한 내부 구조를 실제 브라우저
 // 없이는 확신할 수 없어, 알려진 후보를 여러 개 순서대로 시도한다.
-function mainWorldGetCaptionTracks() {
+//
+// 실측으로 확인된 또 다른 함정: 쇼츠는 부드러운 스크롤을 위해 다음/이전 영상을 DOM에 미리
+// 로드해둔다. 셀렉터가 "활성" 플레이어가 아니라 옆에 미리 로드된 다른 영상의 플레이어를
+// 잡으면, 지금 보고 있는 영상과 전혀 다른 영상의 캡션 트랙을 가져오게 된다(실제로 재현됨:
+// v= 파라미터가 현재 페이지의 videoId와 다른 채로 요청이 나갔다). 그래서 각 후보에서 얻은
+// playerResponse.videoDetails.videoId가 우리가 기대하는 videoId와 일치하는지 반드시 검증한다.
+function mainWorldGetCaptionTracks(expectedVideoId) {
   function tracksFrom(playerResponse) {
+    if (!playerResponse) return null;
+    if (expectedVideoId && playerResponse.videoDetails?.videoId !== expectedVideoId) return null;
     const tracks = playerResponse?.captions?.playerCaptionsTracklistRenderer?.captionTracks;
     return Array.isArray(tracks) && tracks.length ? tracks : null;
   }
@@ -52,7 +60,7 @@ function mainWorldGetCaptionTracks() {
 
     if (!tracks) {
       // 쇼츠 전용 플레이어 컨테이너로 알려진/추정되는 후보들. 정확한 구조를 확신할 수 없어
-      // 여러 셀렉터를 넓게 시도하고, getPlayerResponse를 제공하는 첫 번째 것을 쓴다.
+      // 여러 셀렉터를 넓게 시도하고, videoId가 맞는 것을 찾을 때까지 훑는다.
       const candidates = document.querySelectorAll(
         '#shorts-player, ytd-reel-video-renderer[is-active] #player, ytd-reel-video-renderer #player, ytd-shorts [id*="player"]',
       );
@@ -65,11 +73,12 @@ function mainWorldGetCaptionTracks() {
     }
 
     if (!tracks) {
-      // 마지막 수단: 페이지 안의 모든 후보 엘리먼트 중 getPlayerResponse를 제공하는 것을 훑는다.
-      const anyPlayerEl = Array.from(document.querySelectorAll('[id*="player"]')).find(
-        (el) => typeof el.getPlayerResponse === 'function',
-      );
-      if (anyPlayerEl) tracks = tracksFrom(anyPlayerEl.getPlayerResponse());
+      // 마지막 수단: 페이지 안의 모든 후보 엘리먼트 중 videoId가 맞는 것을 훑는다.
+      for (const el of document.querySelectorAll('[id*="player"]')) {
+        if (typeof el.getPlayerResponse !== 'function') continue;
+        tracks = tracksFrom(el.getPlayerResponse());
+        if (tracks) break;
+      }
     }
 
     if (!tracks) return [];
@@ -86,7 +95,7 @@ function mainWorldGetCaptionTracks() {
 // URL을 조립하지 않고, 유튜브 자신의 코드가 그 요청을 쏘도록 유도한 뒤 가로채는 것뿐이다.
 // 신뢰도가 낮다는 걸 명확히 밝힌다 — 아래 셀렉터/플레이어 API 호출은 실제 브라우저 없이 검증할
 // 방법이 없다. 안 되면 [SFC transcript][capture] 로그를 보고 다음 수를 정한다.
-function mainWorldCaptureRealCaption() {
+function mainWorldCaptureRealCaption(expectedVideoId) {
   return new Promise((resolve) => {
     const TIMEOUT_MS = 4500;
     let settled = false;
@@ -105,6 +114,18 @@ function mainWorldCaptureRealCaption() {
     window.fetch = function (input, init) {
       const url = typeof input === 'string' ? input : input && input.url;
       if (url && url.indexOf('/api/timedtext') !== -1) {
+        // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 가로챈 요청이 지금 보고 있는 영상 것이
+        // 맞는지 v= 파라미터로 확인한다 — 아니면 무시하고 계속 기다린다.
+        let requestVideoId = null;
+        try {
+          requestVideoId = new URL(url, location.href).searchParams.get('v');
+        } catch {
+          // URL 파싱 실패 시 검증 없이 진행
+        }
+        if (expectedVideoId && requestVideoId && requestVideoId !== expectedVideoId) {
+          console.log('[SFC transcript][capture] ignoring timedtext fetch for a different video', requestVideoId);
+          return originalFetch.apply(this, arguments);
+        }
         console.log('[SFC transcript][capture] intercepted timedtext fetch');
         return originalFetch.call(this, input, init).then((res) => {
           res
@@ -120,17 +141,29 @@ function mainWorldCaptureRealCaption() {
 
     timeoutId = setTimeout(() => finish({ ok: false, reason: 'timeout' }), TIMEOUT_MS);
 
+    // 쇼츠는 다음/이전 영상을 미리 로드해두므로, 후보 중 videoId가 실제로 맞는 것을 우선한다
+    // (안 맞는 플레이어에 loadModule/setOption을 걸면 엉뚱한 영상 캡션을 트리거하게 된다).
     function findPlayerEl() {
-      return (
-        document.querySelector('#movie_player') ||
-        document.querySelector('#shorts-player') ||
-        document.querySelector('ytd-reel-video-renderer[is-active] #player') ||
-        document.querySelector('ytd-reel-video-renderer #player') ||
-        Array.from(document.querySelectorAll('[id*="player"]')).find(
-          (el) => typeof el.loadModule === 'function' || typeof el.setOption === 'function',
-        ) ||
-        null
-      );
+      const candidates = [
+        document.querySelector('#movie_player'),
+        document.querySelector('#shorts-player'),
+        document.querySelector('ytd-reel-video-renderer[is-active] #player'),
+        ...document.querySelectorAll('ytd-reel-video-renderer #player'),
+        ...document.querySelectorAll('[id*="player"]'),
+      ].filter((el) => el && (typeof el.loadModule === 'function' || typeof el.setOption === 'function'));
+
+      if (expectedVideoId) {
+        const matched = candidates.find((el) => {
+          try {
+            return typeof el.getPlayerResponse === 'function' && el.getPlayerResponse()?.videoDetails?.videoId === expectedVideoId;
+          } catch {
+            return false;
+          }
+        });
+        if (matched) return matched;
+        console.log('[SFC transcript][capture] no player candidate matched expected videoId, falling back to first candidate (unverified)');
+      }
+      return candidates[0] || null;
     }
 
     let triggered = false;
@@ -214,6 +247,7 @@ async function handle(message, sender) {
           target: { tabId: sender.tab.id },
           world: 'MAIN',
           func: mainWorldGetCaptionTracks,
+          args: [message.videoId || null],
         });
         const tracks = Array.isArray(injection?.result) ? injection.result : [];
         console.info('[SFC transcript] MAIN-world extraction returned', tracks.length, 'tracks for tab', sender.tab.id);
@@ -234,6 +268,7 @@ async function handle(message, sender) {
           target: { tabId: sender.tab.id },
           world: 'MAIN',
           func: mainWorldCaptureRealCaption,
+          args: [message.videoId || null],
         });
         return injection?.result || { ok: false, reason: 'no_result' };
       } catch (err) {
