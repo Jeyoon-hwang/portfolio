@@ -16,7 +16,13 @@ export async function callGemini(model, systemPrompt, userText, apiKey, tools) {
     contents: [{ role: 'user', parts: [{ text: userText }] }],
     generationConfig: { temperature: 0 },
   };
+  // 도구(웹 검색)를 안 쓰는 호출은 전부 JSON 한 덩어리를 기대하는 추출/분류 작업이다.
+  // "JSON만 출력하라"고 프롬프트로 부탁하는 것만으로는 모델이 설명 문장을 덧붙이거나
+  // 코드블록으로 감싸는 일이 있었고, 그러면 파싱이 깨져 결과가 통째로 버려졌다(실측:
+  // 2796자짜리 뉴스 자막이 unparsed로 실패). responseMimeType으로 JSON을 강제하면
+  // 이 실패 유형이 원천적으로 사라진다. 검색 그라운딩과는 같이 못 쓰므로 tools가 있으면 뺀다.
   if (tools) body.tools = tools;
+  else body.generationConfig.responseMimeType = 'application/json';
 
   const res = await fetch(url, {
     method: 'POST',

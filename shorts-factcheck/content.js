@@ -338,6 +338,9 @@
   // 것보다 이만큼 기다려보는 쪽이 손해가 없다.
   const POT_WAIT_MS = 5000;
 
+  // pot 진단은 세션당 한 번만 (아래 logPotDiagnostics 참고)
+  let potDiagnosticsLogged = false;
+
   // fetchTranscript/extractVideoClaim이 실패한 단계를 그대로 화면에 노출한다 —
   // 개발자 콘솔을 열지 않아도 어느 단계에서 막혔는지 바로 보고할 수 있게 하기 위함.
   const TRANSCRIPT_REASON_LABEL = {
@@ -935,12 +938,20 @@
   // pot을 못 구했을 때만 MAIN 월드가 실제로 뭘 봤는지 받아 찍는다. 원인이 "콜드 로드라
   // Innertube 요청 자체가 없었음"인지 "요청은 봤는데 pot이 안 들어있었음"인지 구분하려는 것.
   function logPotDiagnostics() {
+    // 이 진단은 세션당 한 번만 찍는다. 영상마다 찍었더니 innertube 경로 목록이 통째로
+    // 반복돼 콘솔이 수천 줄로 밀려났고(실측: 2212줄 생략), 정작 봐야 할 로그가 묻혔다.
+    // 내용도 세션 누적값이라 매번 다시 볼 이유가 없다.
+    if (potDiagnosticsLogged) return;
+    potDiagnosticsLogged = true;
+
     const onResult = (e) => {
       document.removeEventListener('sfc-pot-debug-result', onResult);
       const d = e.detail || {};
+      // 경로 목록도 호출이 많은 순으로 상위 몇 개만 남긴다 — 전부 찍을 이유가 없다.
+      const paths = (d.innertubePaths || []).slice(0, 6).join(', ');
       console.info(
-        '[SFC transcript][pot] 진단 — innertube 요청:',
-        d.innertubePaths?.length ? d.innertubePaths.join(', ') : '(하나도 못 봄)',
+        '[SFC transcript][pot] 진단(세션 1회) — innertube 요청:',
+        paths || '(하나도 못 봄)',
         '| pot 수집: URL',
         d.potFromUrlCount,
         '/ 본문',
@@ -952,13 +963,10 @@
         '| BotGuard 요청:',
         `${d.botguardRequestCount || 0}건 (실패 ${d.botguardFailureCount || 0})`,
       );
-      // 요청이 나가지도 않거나 전부 실패하면 pot은 영원히 안 생긴다 — 확장 프로그램이
-      // 고칠 수 있는 범위 밖이므로 원인을 분명히 알려준다.
-      if (!d.botguardRequestCount) {
-        console.warn('[SFC transcript][pot] BotGuard 요청이 한 번도 안 나갔습니다 — 이 브라우저에서 pot이 생성되지 않는 환경으로 보입니다(광고 차단기/네트워크 정책 등).');
-      } else if (d.botguardFailureCount >= d.botguardRequestCount) {
-        console.warn('[SFC transcript][pot] BotGuard 요청이 전부 실패했습니다 — 해당 도메인이 차단된 것으로 보입니다. 차단을 풀지 않으면 자막 pot은 못 얻습니다.');
-      }
+      // BotGuard 요청 수는 참고용 숫자로만 남긴다. 경고를 띄웠더니 오히려 틀렸다 —
+      // "요청 0건"인데도 pot이 정상 발급된 세션이 관측됐다(BotGuard가 우리가 아는 URL
+      // 패턴 밖에서 도는 것으로 보인다). 감지가 불확실한 값으로 "차단된 것 같다"고
+      // 단정하면 멀쩡한 환경에서 헛다리를 짚게 하므로 경고는 뺐다.
     };
     document.addEventListener('sfc-pot-debug-result', onResult);
     document.dispatchEvent(new CustomEvent('sfc-pot-debug-query'));
