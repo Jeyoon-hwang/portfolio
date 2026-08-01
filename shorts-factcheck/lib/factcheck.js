@@ -54,7 +54,7 @@ export async function extractVideoClaims(transcript, apiKey, maxClaims) {
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
-      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, systemPrompt, userPrompt, apiKey);
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, systemPrompt, userPrompt, apiKey, null, CLAIMS_LIST_SCHEMA);
       if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도
@@ -128,6 +128,26 @@ const VERIFY_SYSTEM_PROMPT = `너는 팩트체크 판정관이다. 유튜브 쇼
 마크다운 코드블록이나 백틱은 쓰지 마라.
 {"verdict":"사실|거짓|불충분|부분적 사실","reason":"판정 근거를 한두 문장으로 요약","sources":["https://...", "https://..."]}`;
 
+// 응답 모양을 API 차원에서 고정한다 — mimeType만으론 "JSON이긴 한데 어떤 모양인지"가
+// 안 정해져서, 모델이 감싸거나 키 이름을 바꾸면 파싱이 통째로 실패한다.
+// has_claim이 false면 claim은 없어도 되므로 required에서 뺀다.
+const CLAIM_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    has_claim: { type: 'BOOLEAN' },
+    claim: { type: 'STRING' },
+  },
+  required: ['has_claim'],
+};
+
+const CLAIMS_LIST_SCHEMA = {
+  type: 'OBJECT',
+  properties: {
+    claims: { type: 'ARRAY', items: { type: 'STRING' } },
+  },
+  required: ['claims'],
+};
+
 function parseJsonObject(raw) {
   const cleaned = raw.replace(/```json|```/g, '');
   const match = cleaned.match(/\{[\s\S]*\}/);
@@ -178,7 +198,7 @@ export async function extractClaim(commentText, apiKey, context) {
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
-      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, EXTRACT_SYSTEM_PROMPT, userPrompt, apiKey);
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, EXTRACT_SYSTEM_PROMPT, userPrompt, apiKey, null, CLAIM_SCHEMA);
       if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도
@@ -206,7 +226,7 @@ export async function extractVideoClaim(transcript, apiKey) {
   let blocked = false;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
-      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_SYSTEM_PROMPT, userPrompt, apiKey);
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_SYSTEM_PROMPT, userPrompt, apiKey, null, CLAIM_SCHEMA);
       if (isGeminiBlocked(data)) blocked = true;
       else parsed = parseJsonObject(extractGeminiText(data));
     } catch {
@@ -229,7 +249,7 @@ export async function extractVideoClaimFromMeta(title, description, apiKey) {
   let parsed = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
-      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT, userPrompt, apiKey);
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_FROM_META_SYSTEM_PROMPT, userPrompt, apiKey, null, CLAIM_SCHEMA);
       if (!isGeminiBlocked(data)) parsed = parseJsonObject(extractGeminiText(data));
     } catch {
       // 재시도

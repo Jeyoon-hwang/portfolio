@@ -23,6 +23,20 @@ const SYSTEM_PROMPT = `너는 유튜브 쇼츠 댓글을 4개 카테고리 중 �
 출력 형식 예시: [{"i":0,"c":"agree"},{"i":1,"c":"rebuttal"}]
 마크다운 코드블록이나 백틱을 절대 사용하지 말고 JSON 배열만 출력하라.`;
 
+// 응답 모양을 API 차원에서 고정한다. mimeType만 켜두면 모델이 배열 대신 객체로 감싸 보내는
+// 일이 있고, 그러면 배치 전체가 파싱 실패로 "기타"가 돼버린다(실측으로 겪은 회귀다).
+const CLASSIFICATION_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      i: { type: 'INTEGER' },
+      c: { type: 'STRING', enum: VALID_CATEGORIES },
+    },
+    required: ['i', 'c'],
+  },
+};
+
 function buildUserPrompt(batch) {
   return batch
     .map((c, i) => {
@@ -53,17 +67,23 @@ function parseClassificationArray(raw) {
   }
 }
 
-async function classifyBatch(batch, apiKey) {
+// 실패 원인을 밖으로 알린다. 예전엔 bare catch가 에러를 통째로 삼켜서, 배치가 전부 실패해도
+// "왜"를 알 수 없었다 — API 거부인지, 응답이 비었는지, 파싱이 깨졌는지 구분이 안 됐다.
+async function classifyBatch(batch, apiKey, onFailure) {
   const userPrompt = buildUserPrompt(batch);
+  let lastReason = 'unknown';
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, SYSTEM_PROMPT, userPrompt, apiKey);
-      const arr = parseClassificationArray(extractGeminiText(data));
+      const data = await callGemini(GEMINI_FLASH_LITE_MODEL, SYSTEM_PROMPT, userPrompt, apiKey, null, CLASSIFICATION_SCHEMA);
+      const text = extractGeminiText(data);
+      const arr = parseClassificationArray(text);
       if (arr && arr.length) return arr;
-    } catch {
-      // 재시도
+      lastReason = text ? `파싱 실패 (응답 앞부분: "${text.slice(0, 120)}")` : '응답이 비어 있음';
+    } catch (err) {
+      lastReason = `호출 실패: ${err?.message || err}`;
     }
   }
+  onFailure(lastReason);
   return null; // 실패한 배치는 misc 기본값을 유지한다
 }
 
@@ -80,7 +100,10 @@ export async function classifyComments(comments, apiKey) {
     batches.push({ start, batch: comments.slice(start, start + BATCH_SIZE) });
   }
 
-  const results = await Promise.all(batches.map(({ batch }) => classifyBatch(batch, apiKey)));
+  const failureReasons = [];
+  const results = await Promise.all(
+    batches.map(({ batch }) => classifyBatch(batch, apiKey, (reason) => failureReasons.push(reason))),
+  );
 
   let failedBatches = 0;
   let unclassified = 0;
@@ -112,7 +135,7 @@ export async function classifyComments(comments, apiKey) {
   }
 
   const bgLog = failedBatches
-    ? `댓글 분류 실패 배치 ${failedBatches}/${batches.length} — 댓글 ${unclassified}개가 분류되지 못하고 "기타"로 남았습니다`
+    ? `댓글 분류 실패 배치 ${failedBatches}/${batches.length} — 댓글 ${unclassified}개가 "기타"로 남았습니다. 원인: ${failureReasons[0] || 'unknown'}`
     : `댓글 분류 완료 (${batches.length}배치, ${comments.length}개)`;
   if (failedBatches) console.warn('[SFC classify]', bgLog);
 
