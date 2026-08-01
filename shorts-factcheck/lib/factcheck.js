@@ -224,13 +224,14 @@ export async function extractVideoClaim(transcript, apiKey) {
 
   let parsed = null;
   let blocked = false;
+  let callError = null;
   for (let attempt = 0; attempt < 2 && !parsed; attempt++) {
     try {
       const data = await callGemini(GEMINI_FLASH_LITE_MODEL, VIDEO_CLAIM_SYSTEM_PROMPT, userPrompt, apiKey, null, CLAIM_SCHEMA);
       if (isGeminiBlocked(data)) blocked = true;
       else parsed = parseJsonObject(extractGeminiText(data));
-    } catch {
-      // 재시도
+    } catch (err) {
+      callError = err?.message || String(err);
     }
   }
 
@@ -238,6 +239,9 @@ export async function extractVideoClaim(transcript, apiKey) {
     return { claim: parsed.claim.trim(), detail: 'ok' };
   }
   if (parsed) return { claim: null, detail: 'no_claim' };
+  // 예전엔 호출이 통째로 실패해도 'unparsed'로 뭉뚱그려서, 크레딧 소진(429) 같은 명백한
+  // 원인이 "모델이 이상하게 답했다"처럼 보였다. 호출 실패는 그 메시지를 그대로 올린다.
+  if (callError) return { claim: null, detail: `호출 실패: ${callError}` };
   return { claim: null, detail: blocked ? 'blocked' : 'unparsed' };
 }
 

@@ -75,6 +75,14 @@ export function extractGeminiText(data) {
 
 // 안전 정책상 차단되면 candidates가 비고 promptFeedback.blockReason이 채워지거나,
 // candidate.finishReason이 "SAFETY"로 온다.
+// 크레딧 소진(429 RESOURCE_EXHAUSTED)은 코드 문제가 아니라 결제 문제인데, 겉으로는
+// "댓글이 전부 기타" "영상 주장 없음"처럼 보여서 한참 엉뚱한 곳을 뒤지게 만든다.
+// 이 상태를 따로 알아보고 화면에 그대로 말해주기 위한 판별자.
+export function isQuotaError(message) {
+  const text = String(message || '');
+  return text.includes('429') || text.includes('RESOURCE_EXHAUSTED') || text.includes('credits are depleted');
+}
+
 export function isGeminiBlocked(data) {
   const candidate = data.candidates?.[0];
   return !!data.promptFeedback?.blockReason || !candidate || candidate.finishReason === 'SAFETY';

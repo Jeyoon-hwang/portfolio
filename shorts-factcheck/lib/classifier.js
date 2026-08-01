@@ -1,4 +1,4 @@
-import { callGemini, extractGeminiText, GEMINI_FLASH_LITE_MODEL } from './gemini.js';
+import { callGemini, extractGeminiText, isQuotaError, GEMINI_FLASH_LITE_MODEL } from './gemini.js';
 
 const BATCH_SIZE = 50;
 const VALID_CATEGORIES = ['rebuttal', 'source', 'agree', 'misc'];
@@ -134,8 +134,10 @@ export async function classifyComments(comments, apiKey) {
     percentages[key] = Math.round((distribution[key] / total) * 100);
   }
 
+  const firstReason = failureReasons[0] || 'unknown';
+  const quotaExhausted = failedBatches > 0 && failureReasons.some(isQuotaError);
   const bgLog = failedBatches
-    ? `댓글 분류 실패 배치 ${failedBatches}/${batches.length} — 댓글 ${unclassified}개가 "기타"로 남았습니다. 원인: ${failureReasons[0] || 'unknown'}`
+    ? `댓글 분류 실패 배치 ${failedBatches}/${batches.length} — 댓글 ${unclassified}개가 "기타"로 남았습니다. 원인: ${firstReason}`
     : `댓글 분류 완료 (${batches.length}배치, ${comments.length}개)`;
   if (failedBatches) console.warn('[SFC classify]', bgLog);
 
@@ -144,5 +146,7 @@ export async function classifyComments(comments, apiKey) {
     distribution,
     percentages,
     bgLog,
+    // 크레딧이 떨어진 거면 분포를 그럴듯하게 보여주는 게 오히려 거짓말이다 — 화면에 그대로 알린다.
+    quotaExhausted,
   };
 }

@@ -1210,6 +1210,17 @@
     // 분류 배치가 실패하면 그 댓글들이 조용히 "기타"로 남으므로, 왜 기타가 많은지
     // 화면만 보고 오해하지 않도록 페이지 콘솔에도 남긴다.
     if (classifyRes.bgLog) console.info('[SFC classify]', classifyRes.bgLog);
+    // 크레딧이 소진되면 모든 호출이 429로 죽는데, 화면상으로는 "댓글이 전부 기타"나
+    // "영상 주장 없음"처럼 보여서 원인을 한참 헤매게 된다. 그대로 말해준다.
+    if (classifyRes.quotaExhausted) {
+      const notice =
+        '<p class="sfc-note">Gemini API 크레딧이 소진되어 분석을 진행할 수 없습니다. ' +
+        '<a href="https://ai.studio/projects" target="_blank" rel="noopener">AI Studio</a>에서 결제 상태를 확인하세요.</p>';
+      setSectionBody('comments', notice);
+      setSectionBody('videocheck', notice);
+      setSectionBody('factcheck', notice);
+      return;
+    }
     if (classifyRes.error) {
       setSectionBody('comments', `<p class="sfc-note">댓글 분류에 실패했습니다: ${escapeHtml(classifyRes.message || classifyRes.error)}</p>`);
       setSectionBody('factcheck', '<p class="sfc-note">댓글 분류 실패로 팩트체크를 진행할 수 없습니다.</p>');
