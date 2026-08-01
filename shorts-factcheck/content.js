@@ -1207,6 +1207,9 @@
 
     const classifyRes = await sendMessage({ type: 'CLASSIFY_COMMENTS', comments });
     if (token !== runToken) return;
+    // 분류 배치가 실패하면 그 댓글들이 조용히 "기타"로 남으므로, 왜 기타가 많은지
+    // 화면만 보고 오해하지 않도록 페이지 콘솔에도 남긴다.
+    if (classifyRes.bgLog) console.info('[SFC classify]', classifyRes.bgLog);
     if (classifyRes.error) {
       setSectionBody('comments', `<p class="sfc-note">댓글 분류에 실패했습니다: ${escapeHtml(classifyRes.message || classifyRes.error)}</p>`);
       setSectionBody('factcheck', '<p class="sfc-note">댓글 분류 실패로 팩트체크를 진행할 수 없습니다.</p>');

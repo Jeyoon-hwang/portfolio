@@ -39,8 +39,15 @@ function buildUserPrompt(batch) {
 function parseClassificationArray(raw) {
   const cleaned = raw.replace(/```json|```/g, '').trim();
   try {
-    const arr = JSON.parse(cleaned);
-    return Array.isArray(arr) ? arr : null;
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed)) return parsed;
+    // responseMimeType으로 JSON을 강제하면 모델이 배열 대신 객체로 감싸서 주는 경우가 있다
+    // ({"results":[...]} 등). 예전엔 이걸 파싱 실패로 보고 배치 전체를 기타로 흘려보냈다.
+    if (parsed && typeof parsed === 'object') {
+      const arr = Object.values(parsed).find((v) => Array.isArray(v));
+      if (arr) return arr;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -63,6 +70,9 @@ async function classifyBatch(batch, apiKey) {
 // 배치들을 병렬로 던진다 — 순차 처리 시 배치 수만큼 지연이 누적돼 "쇼츠 보는 시간의 절반"
 // 안에 끝내야 한다는 속도 요구를 못 맞춘다.
 export async function classifyComments(comments, apiKey) {
+  // misc가 기본값이라 분류가 실패한 배치는 통째로 "기타"로 남는다. 예전엔 이게 아무 흔적도
+  // 안 남아서 "댓글이 전부 기타"로 보일 때 분류가 깨진 건지 진짜 기타뿐인 건지 알 수 없었다.
+  // 실패 배치 수와 영향받은 댓글 수를 세서 호출한 쪽에 돌려준다.
   const categories = new Array(comments.length).fill('misc');
 
   const batches = [];
@@ -72,13 +82,22 @@ export async function classifyComments(comments, apiKey) {
 
   const results = await Promise.all(batches.map(({ batch }) => classifyBatch(batch, apiKey)));
 
+  let failedBatches = 0;
+  let unclassified = 0;
   results.forEach((parsed, batchIndex) => {
-    if (!parsed) return;
-    const { start } = batches[batchIndex];
+    const { start, batch } = batches[batchIndex];
+    if (!parsed) {
+      failedBatches++;
+      unclassified += batch.length;
+      return;
+    }
     for (const entry of parsed) {
-      const idx = start + entry.i;
-      if (idx < categories.length && VALID_CATEGORIES.includes(entry.c)) {
-        categories[idx] = entry.c;
+      const idx = start + Number(entry?.i);
+      // 모델이 "Rebuttal"처럼 대문자로 주거나 공백을 붙여 보내면 예전엔 그대로 버려져
+      // 그 댓글만 조용히 기타가 됐다.
+      const category = String(entry?.c || '').trim().toLowerCase();
+      if (Number.isInteger(idx) && idx >= start && idx < categories.length && VALID_CATEGORIES.includes(category)) {
+        categories[idx] = category;
       }
     }
   });
@@ -92,9 +111,15 @@ export async function classifyComments(comments, apiKey) {
     percentages[key] = Math.round((distribution[key] / total) * 100);
   }
 
+  const bgLog = failedBatches
+    ? `댓글 분류 실패 배치 ${failedBatches}/${batches.length} — 댓글 ${unclassified}개가 분류되지 못하고 "기타"로 남았습니다`
+    : `댓글 분류 완료 (${batches.length}배치, ${comments.length}개)`;
+  if (failedBatches) console.warn('[SFC classify]', bgLog);
+
   return {
     classified: comments.map((c, i) => ({ ...c, category: categories[i] })),
     distribution,
     percentages,
+    bgLog,
   };
 }
